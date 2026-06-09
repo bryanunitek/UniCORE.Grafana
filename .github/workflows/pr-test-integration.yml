@@ -28,7 +28,7 @@ jobs:
     outputs:
       changed: ${{ steps.detect-changes.outputs.backend }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6.0.3
         with:
           persist-credentials: true # required to get more history in the changed-files action
           fetch-depth: 0
@@ -58,7 +58,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6.0.3
         with:
           persist-credentials: false
       - name: Setup Go
@@ -106,7 +106,7 @@ jobs:
           - 3306:3306
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6.0.3
         with:
           persist-credentials: false
       - name: Setup Go
@@ -148,7 +148,7 @@ jobs:
       POSTGRES_HOST: 127.0.0.1
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6.0.3
         with:
           persist-credentials: false
       - name: Start Postgres via docker compose
@@ -195,7 +195,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6.0.3
         with:
           persist-credentials: false
       - name: Get GitHub App token
@@ -255,7 +255,7 @@ jobs:
           - 3306:3306
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6.0.3
         with:
           persist-credentials: false
       - name: Get GitHub App token
@@ -309,7 +309,7 @@ jobs:
       POSTGRES_HOST: 127.0.0.1
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6.0.3
         with:
           persist-credentials: false
       - name: Start Postgres via docker compose

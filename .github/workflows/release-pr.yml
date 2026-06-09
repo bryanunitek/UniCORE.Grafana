@@ -109,14 +109,14 @@ jobs:
           github_app: grafana-delivery-bot
       - run: echo "RELEASE_BRANCH=release-${VERSION}" >> "$GITHUB_ENV"
       - name: Checkout Grafana
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6.0.3
         with:
           token: ${{ steps.get-github-app-token.outputs.token }}
           ref: ${{ env.RELEASE_BRANCH }}
           fetch-tags: true
           fetch-depth: 0
       - name: Checkout Grafana (main)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6.0.3
         with:
           token: ${{ steps.get-github-app-token.outputs.token }}
           ref: main
