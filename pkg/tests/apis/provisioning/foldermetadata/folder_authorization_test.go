@@ -36,9 +36,10 @@ func TestIntegrationProvisioning_CrossFolderWriteDeniedWithoutDestinationAccess(
 	writeToProvisioningPath(t, helper, "innerB/_folder.json", folderMetadataJSON("inner-b-uid", "Inner B"))
 	writeToProvisioningPath(t, helper, "innerA/cross-folder-dash.json", dashboardBody)
 
-	helper.CreateRepo(t, common.TestRepo{
+	helper.CreateLocalRepo(t, common.TestRepo{
 		Name:                   repoName,
-		Target:                 "folder",
+		SyncTarget:             "folder",
+		Workflows:              []string{"write"},
 		SkipResourceAssertions: true,
 	})
 
@@ -102,9 +103,10 @@ func TestIntegrationProvisioning_FolderAuthorizationWithMetadata(t *testing.T) {
 		folderPathPrefix = "parent-with-metadata"
 	)
 
-	helper.CreateRepo(t, common.TestRepo{
+	helper.CreateLocalRepo(t, common.TestRepo{
 		Name:                   repoName,
-		Target:                 "instance",
+		SyncTarget:             "instance",
+		Workflows:              []string{"write"},
 		SkipResourceAssertions: true,
 	})
 
@@ -131,7 +133,7 @@ func TestIntegrationProvisioning_FolderAuthorizationWithMetadata(t *testing.T) {
 	// 2. Folder deletion on the configured branch is intentionally disabled (returns 405)
 	// 3. Testing deletion on feature branches requires git repositories with BranchWorkflow
 	t.Run("Admin and Editor can create folders", func(t *testing.T) {
-		resp := adminFiles.Post(t, folderPathPrefix+"/")
+		resp := adminFiles.Post(t, folderPathPrefix+"/", nil)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "Admin should be able to create parent folder")
 
 		parentUID := adminFiles.ReadFolderUID(t, ctx, folderPathPrefix+"/_folder.json")
@@ -139,7 +141,7 @@ func TestIntegrationProvisioning_FolderAuthorizationWithMetadata(t *testing.T) {
 
 		// Editor should be able to create a child folder.
 		// Validates authorization uses stable UID from parent's _folder.json.
-		childResp := editorFiles.Post(t, folderPathPrefix+"/child/")
+		childResp := editorFiles.Post(t, folderPathPrefix+"/child/", nil)
 		require.Equal(t, http.StatusOK, childResp.StatusCode, "Editor should be able to create child folder")
 
 		childUID := adminFiles.ReadFolderUID(t, ctx, folderPathPrefix+"/child/_folder.json")

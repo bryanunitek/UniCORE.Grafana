@@ -64,7 +64,7 @@ export function ChannelSubForm<R extends ChannelValues>({
   customValidators = {},
 }: Props<R>): JSX.Element {
   const styles = useStyles2(getStyles);
-  const { control, watch, register, trigger, formState, setValue, getValues } =
+  const { control, watch, register, trigger, formState, setValue, getValues, unregister } =
     useFormContext<ReceiverFormValues<CloudChannelValues | GrafanaChannelValues>>();
 
   const channelFieldPath = `items.${integrationIndex}` as const;
@@ -173,34 +173,36 @@ export function ChannelSubForm<R extends ChannelValues>({
     const fieldPath = settingsPath.startsWith(`${channelFieldPath}.settings.`)
       ? settingsPath.slice(`${channelFieldPath}.settings.`.length)
       : settingsPath;
-    setValue(`${settingsFieldPath}.${fieldPath}`, undefined);
+    const fullPath = `${settingsFieldPath}.${fieldPath}` as const;
+    unregister(fullPath);
+    setValue(fullPath, undefined);
   };
 
   const typeOptions = useMemo((): SelectableValue[] => {
-    // Filter out notifiers that can't be created (e.g., v0-only integrations like WeChat)
-    // These are legacy integrations that only exist in Mimir and can't be created in Grafana
-    // BUT: Always include the current type if editing an existing integration
+    // Non-creatable notifiers (e.g., WeChat which is v0-only, or types the admin has disallowed
+    // via the allowed_integrations setting) are shown as disabled options so users can see them
+    // in the dropdown. The currently selected type is never disabled, so an existing integration
+    // of a now-disallowed type can still be viewed and edited.
     const currentType = initialValues?.type || defaultValues.type;
-    const creatableNotifiers = notifiers.filter(({ dto }) => canCreateNotifier(dto) || dto.type === currentType);
 
-    return sortBy(creatableNotifiers, ({ dto, meta }) => [meta?.order ?? 0, dto.name]).map<SelectableValue>(
-      ({ dto: { name, type }, meta }) => {
-        return {
-          // ReactNode is supported in Select label, but types don't reflect it
-          /* eslint-disable @typescript-eslint/consistent-type-assertions, @typescript-eslint/no-explicit-any */
-          label: (
-            <Stack alignItems="center" gap={1}>
-              {name}
-              {meta?.badge}
-            </Stack>
-          ) as any,
-          /* eslint-enable @typescript-eslint/consistent-type-assertions, @typescript-eslint/no-explicit-any */
-          value: type,
-          description: meta?.description,
-          isDisabled: meta ? !meta.enabled : false,
-        };
-      }
-    );
+    return sortBy(notifiers, ({ dto, meta }) => [meta?.order ?? 0, dto.name]).map<SelectableValue>(({ dto, meta }) => {
+      const metaDisabled = meta ? !meta.enabled : false;
+      const notCreatable = !canCreateNotifier(dto) && dto.type !== currentType;
+      return {
+        // ReactNode is supported in Select label, but types don't reflect it
+        /* eslint-disable @typescript-eslint/consistent-type-assertions, @typescript-eslint/no-explicit-any */
+        label: (
+          <Stack alignItems="center" gap={1}>
+            {dto.name}
+            {meta?.badge}
+          </Stack>
+        ) as any,
+        /* eslint-enable @typescript-eslint/consistent-type-assertions, @typescript-eslint/no-explicit-any */
+        value: dto.type,
+        description: meta?.description,
+        isDisabled: metaDisabled || notCreatable,
+      };
+    });
   }, [notifiers, initialValues?.type, defaultValues.type]);
 
   const handleTest = async () => {
@@ -407,7 +409,7 @@ const getStyles = (theme: GrafanaTheme2) => ({
     margin: theme.spacing(2, 0),
     padding: theme.spacing(1),
     border: `solid 1px ${theme.colors.border.medium}`,
-    borderRadius: theme.shape.radius.default,
+    borderRadius: theme.shape.radius.lg,
   }),
   topRow: css({
     display: 'flex',

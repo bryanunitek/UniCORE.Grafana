@@ -12,9 +12,10 @@
 
 import * as common from '@grafana/schema';
 
-export const pluginVersion = "13.0.2";
+export const pluginVersion = "13.1.10";
 
 export interface Options {
+  allowDownload?: boolean;
   controlsStorageKey?: string;
   dedupStrategy: common.LogsDedupStrategy;
   detailsMode?: ('inline' | 'sidebar');

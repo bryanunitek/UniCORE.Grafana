@@ -133,6 +133,41 @@ func TestService_SignIdentity(t *testing.T) {
 		assert.Equal(t, "edpu3nnt61se8e", gotClaims.Rest.Identifier)
 	})
 
+	t.Run("groups claim source", func(t *testing.T) {
+		ident := &authn.Identity{
+			ID:             "1",
+			Type:           claims.TypeUser,
+			Login:          "U1",
+			UID:            "edpu3nnt61se8e",
+			Groups:         []string{"team-uid-1", "team-uid-2"},
+			ExternalGroups: []string{"team-uid-1", "team-uid-3"},
+		}
+
+		t.Run("uses Grafana-stored groups by default", func(t *testing.T) {
+			s := ProvideService(
+				setting.NewCfg(), signer, remotecache.NewFakeCacheStorage(),
+				&authntest.FakeService{}, nil, tracing.InitializeTracerForTest(),
+			)
+
+			_, gotClaims, err := s.SignIdentity(context.Background(), ident)
+			require.NoError(t, err)
+			assert.Equal(t, ident.Groups, gotClaims.Rest.Groups)
+		})
+
+		t.Run("uses external groups when IDUseExternalGroupsForGroupsClaim is enabled", func(t *testing.T) {
+			cfg := setting.NewCfg()
+			cfg.IDUseExternalGroupsForGroupsClaim = true
+			s := ProvideService(
+				cfg, signer, remotecache.NewFakeCacheStorage(),
+				&authntest.FakeService{}, nil, tracing.InitializeTracerForTest(),
+			)
+
+			_, gotClaims, err := s.SignIdentity(context.Background(), ident)
+			require.NoError(t, err)
+			assert.Equal(t, ident.ExternalGroups, gotClaims.Rest.Groups)
+		})
+	})
+
 	t.Run("should sign new token if org role has changed", func(t *testing.T) {
 		s := ProvideService(
 			setting.NewCfg(), signer, remotecache.NewFakeCacheStorage(),
@@ -161,5 +196,45 @@ func TestService_SignIdentity(t *testing.T) {
 		third, _, err := s.SignIdentity(context.Background(), ident)
 		require.NoError(t, err)
 		assert.NotEqual(t, first, third)
+	})
+
+	t.Run("should not reuse a token signed for another auth module of the same user", func(t *testing.T) {
+		s := ProvideService(
+			setting.NewCfg(), signer, remotecache.NewFakeCacheStorage(),
+			&authntest.FakeService{}, nil, tracing.InitializeTracerForTest(),
+		)
+
+		newIdent := func(authenticatedBy string) *authn.Identity {
+			return &authn.Identity{
+				ID:              "1",
+				Type:            claims.TypeUser,
+				AuthenticatedBy: authenticatedBy,
+				Login:           "U1",
+				UID:             "edpu3nnt61se8e",
+				OrgID:           1,
+				OrgRoles:        map[int64]org.RoleType{1: org.RoleAdmin},
+				Groups:          []string{"team-uid-1"},
+			}
+		}
+
+		// A render (e.g. a scheduled report) signs in as the user first.
+		renderToken, renderClaims, err := s.SignIdentity(context.Background(), newIdent(login.RenderModule))
+		require.NoError(t, err)
+		assert.Equal(t, login.RenderModule, renderClaims.Rest.AuthenticatedBy)
+
+		// The same user's browser session must get its own token, not the cached render token.
+		proxyToken, proxyClaims, err := s.SignIdentity(context.Background(), newIdent(login.AuthProxyAuthModule))
+		require.NoError(t, err)
+		assert.NotEqual(t, renderToken, proxyToken)
+		assert.Equal(t, login.AuthProxyAuthModule, proxyClaims.Rest.AuthenticatedBy)
+
+		// Each auth module still reuses its own cached token.
+		renderAgain, _, err := s.SignIdentity(context.Background(), newIdent(login.RenderModule))
+		require.NoError(t, err)
+		assert.Equal(t, renderToken, renderAgain)
+
+		proxyAgain, _, err := s.SignIdentity(context.Background(), newIdent(login.AuthProxyAuthModule))
+		require.NoError(t, err)
+		assert.Equal(t, proxyToken, proxyAgain)
 	})
 }

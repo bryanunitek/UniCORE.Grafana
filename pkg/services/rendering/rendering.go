@@ -24,7 +24,7 @@ import (
 	"github.com/grafana/grafana/pkg/infra/metrics"
 	"github.com/grafana/grafana/pkg/infra/remotecache"
 	"github.com/grafana/grafana/pkg/models"
-	"github.com/grafana/grafana/pkg/plugins/backendplugin/pluginextensionv2"
+	"github.com/grafana/grafana/pkg/services/apiserver/endpoints/request"
 	"github.com/grafana/grafana/pkg/services/featuremgmt"
 	"github.com/grafana/grafana/pkg/setting"
 	"github.com/grafana/grafana/pkg/util"
@@ -48,20 +48,9 @@ type RenderingService struct {
 	Cfg                         *setting.Cfg
 	features                    featuremgmt.FeatureToggles
 	RemoteCacheService          *remotecache.RemoteCache
-	RendererPluginManager       PluginManager
 }
 
-type PluginManager interface {
-	Renderer(ctx context.Context) (Plugin, bool)
-}
-
-type Plugin interface {
-	Client() (pluginextensionv2.RendererPlugin, error)
-	Start(ctx context.Context) error
-	Version() string
-}
-
-func ProvideService(cfg *setting.Cfg, features featuremgmt.FeatureToggles, remoteCache *remotecache.RemoteCache, rm PluginManager) (*RenderingService, error) {
+func ProvideService(cfg *setting.Cfg, features featuremgmt.FeatureToggles, remoteCache *remotecache.RemoteCache) (*RenderingService, error) {
 	folders := []string{
 		cfg.ImagesDir,
 		cfg.CSVsDir,
@@ -108,6 +97,8 @@ func ProvideService(cfg *setting.Cfg, features featuremgmt.FeatureToggles, remot
 		domain = "localhost"
 	}
 
+	namespacer := request.GetNamespaceMapper(cfg)
+
 	var renderKeyProvider renderKeyProvider
 	if cfg.RendererServerUrl != "" {
 		//nolint:staticcheck // not yet migrated to OpenFeature
@@ -133,15 +124,17 @@ func ProvideService(cfg *setting.Cfg, features featuremgmt.FeatureToggles, remot
 
 			// overwrite the default key provider when we know we have a better way.
 			renderKeyProvider = &jwtRenderKeyProvider{
-				log:       logger,
-				authToken: []byte(cfg.RendererAuthToken),
-				keyExpiry: cfg.RendererRenderKeyLifeTime,
+				log:        logger,
+				authToken:  []byte(cfg.RendererAuthToken),
+				keyExpiry:  cfg.RendererRenderKeyLifeTime,
+				namespacer: namespacer,
 			}
 		} else {
 			renderKeyProvider = &perRequestRenderKeyProvider{
-				cache:     remoteCache,
-				log:       logger,
-				keyExpiry: cfg.RendererRenderKeyLifeTime,
+				cache:      remoteCache,
+				log:        logger,
+				keyExpiry:  cfg.RendererRenderKeyLifeTime,
+				namespacer: namespacer,
 			}
 		}
 	}
@@ -188,14 +181,13 @@ func ProvideService(cfg *setting.Cfg, features featuremgmt.FeatureToggles, remot
 				semverConstraint: ">= 3.10.0",
 			},
 		},
-		Cfg:                   cfg,
-		features:              features,
-		RemoteCacheService:    remoteCache,
-		RendererPluginManager: rm,
-		log:                   logger,
-		domain:                domain,
-		rendererCallbackURL:   rendererCallbackURL,
-		netClient:             netClient,
+		Cfg:                 cfg,
+		features:            features,
+		RemoteCacheService:  remoteCache,
+		log:                 logger,
+		domain:              domain,
+		rendererCallbackURL: rendererCallbackURL,
+		netClient:           netClient,
 	}
 
 	gob.Register(&RenderUser{})

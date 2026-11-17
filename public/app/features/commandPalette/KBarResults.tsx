@@ -16,6 +16,12 @@ interface RenderParams<T = ActionImpl | string> {
   active: boolean;
 }
 
+interface ItemInfo {
+  label: string | null;
+  posInSet: number;
+  setSize: number;
+}
+
 interface KBarResultsProps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   items: any[];
@@ -31,6 +37,38 @@ export const KBarResults = (props: KBarResultsProps) => {
   // them as a dependency when setting up event listeners.
   const itemsRef = React.useRef(props.items);
   itemsRef.current = props.items;
+
+  // A11y: Pre-compute the group label and set position/size for each item so
+  // that option items can announce their section and "x of y" even when the
+  // virtualizer has removed the section header (or sibling options) from the DOM.
+  // Options are only emitted once the group ends, since setSize isn't known until then.
+  const itemGroupInfo = React.useMemo(() => {
+    const results: ItemInfo[] = [];
+    let groupLabel: string | null = null;
+    let groupSize = 0;
+
+    // commit the current group to the info array
+    const flushGroup = () => {
+      for (let pos = 1; pos <= groupSize; pos++) {
+        results.push({ label: groupLabel, posInSet: pos, setSize: groupSize });
+      }
+      groupSize = 0;
+    };
+
+    for (const item of props.items) {
+      if (typeof item === 'string') {
+        // new group, flush the previous one (if any) and start counting the new one
+        flushGroup();
+        groupLabel = item;
+        results.push({ label: item, posInSet: 0, setSize: 0 });
+      } else {
+        groupSize++;
+      }
+    }
+    // flush the last group
+    flushGroup();
+    return results;
+  }, [props.items]);
 
   const rowVirtualizer = useVirtual({
     size: itemsRef.current.length,
@@ -164,8 +202,11 @@ export const KBarResults = (props: KBarResultsProps) => {
         }}
       >
         {rowVirtualizer.virtualItems.map((virtualRow) => {
+          const rawItem = itemsRef.current[virtualRow.index];
+          const isStringItem = typeof rawItem === 'string';
+
           // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
-          const item = itemsRef.current[virtualRow.index] as ActionImpl & {
+          const item = rawItem as ActionImpl & {
             url?: string | URLCallback;
             target?: React.HTMLAttributeAnchorTarget;
           };
@@ -174,19 +215,26 @@ export const KBarResults = (props: KBarResultsProps) => {
           // so our url property is secretly there, but completely untyped
           // Preferably this change is upstreamed and ActionImpl has this
           const { target, url } = item;
+          const { label: groupLabel, posInSet, setSize } = itemGroupInfo[virtualRow.index];
 
-          const handlers = typeof item !== 'string' && {
+          const handlers = !isStringItem && {
             onPointerMove: () =>
               pointerMoved && activeIndex !== virtualRow.index && query.setActiveIndex(virtualRow.index),
             onPointerDown: () => query.setActiveIndex(virtualRow.index),
             onClick: (ev: React.MouseEvent) => execute(ev, item),
           };
-          const active = virtualRow.index === activeIndex;
+          const active = !isStringItem && virtualRow.index === activeIndex;
 
           const childProps = {
-            id: getListboxItemId(virtualRow.index),
-            role: 'option',
-            'aria-selected': active,
+            ...(isStringItem
+              ? { 'aria-hidden': true }
+              : {
+                  id: getListboxItemId(virtualRow.index),
+                  role: 'option',
+                  'aria-selected': active,
+                  'aria-setsize': setSize,
+                  'aria-posinset': posInSet,
+                }),
             style: {
               position: 'absolute',
               top: 0,
@@ -217,6 +265,7 @@ export const KBarResults = (props: KBarResultsProps) => {
                 ref={active ? (activeRef as React.RefObject<HTMLAnchorElement>) : null}
                 {...childProps}
               >
+                {groupLabel ? <span className="sr-only">{groupLabel}: </span> : null}
                 {renderedItem}
               </a>
             );
@@ -229,6 +278,7 @@ export const KBarResults = (props: KBarResultsProps) => {
               ref={active ? (activeRef as React.RefObject<HTMLDivElement>) : null}
               {...childProps}
             >
+              {groupLabel ? <span className="sr-only">{groupLabel}: </span> : null}
               {renderedItem}
             </div>
           );

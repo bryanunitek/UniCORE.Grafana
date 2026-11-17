@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apiserver/pkg/authentication/user"
 
 	provisioning "github.com/grafana/grafana/apps/provisioning/pkg/apis/provisioning/v0alpha1"
+	appcontroller "github.com/grafana/grafana/apps/provisioning/pkg/controller"
 	common "github.com/grafana/grafana/pkg/apimachinery/apis/common/v0alpha1"
 )
 
@@ -154,6 +156,25 @@ func TestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "githubEnterprise enabled when image rendering is not allowed",
+			repository: func() *provisioning.Repository {
+				return &provisioning.Repository{
+					ObjectMeta: metav1.ObjectMeta{
+						Finalizers: []string{CleanFinalizer},
+					},
+					Spec: provisioning.RepositorySpec{
+						Title:            "Test Repo",
+						Type:             provisioning.GitHubEnterpriseRepositoryType,
+						GitHubEnterprise: &provisioning.GitHubEnterpriseRepositoryConfig{GenerateDashboardPreviews: true},
+					},
+				}
+			}(),
+			expectedErrs: 1,
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				require.Contains(t, errors.ToAggregate().Error(), "spec.generateDashboardPreviews: Invalid value")
+			},
+		},
+		{
 			name: "mismatched git config",
 			repository: func() *provisioning.Repository {
 				return &provisioning.Repository{
@@ -213,6 +234,144 @@ func TestValidator_Validate(t *testing.T) {
 			validateError: func(t *testing.T, errors field.ErrorList) {
 				require.Contains(t, errors.ToAggregate().Error(), "spec.workflow: Invalid value: \"branch\": branch is only supported on git repositories")
 			},
+		},
+		{
+			name: "branch options for local repository",
+			repository: func() *provisioning.Repository {
+				return &provisioning.Repository{
+					ObjectMeta: metav1.ObjectMeta{
+						Finalizers: []string{CleanFinalizer},
+					},
+					Spec: provisioning.RepositorySpec{
+						Title:  "Test Repo",
+						Type:   provisioning.LocalRepositoryType,
+						Branch: &provisioning.BranchOptions{NameTemplate: "{{title}}"},
+					},
+				}
+			}(),
+			expectedErrs: 1,
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				require.Equal(t, "spec.branch", errors[0].Field)
+				require.Contains(t, errors.ToAggregate().Error(), "branch options are not supported on local repositories")
+			},
+		},
+		{
+			name: "commit options for local repository",
+			repository: func() *provisioning.Repository {
+				return &provisioning.Repository{
+					ObjectMeta: metav1.ObjectMeta{
+						Finalizers: []string{CleanFinalizer},
+					},
+					Spec: provisioning.RepositorySpec{
+						Title:  "Test Repo",
+						Type:   provisioning.LocalRepositoryType,
+						Commit: &provisioning.CommitOptions{SingleResourceMessageTemplate: "{{title}}"},
+					},
+				}
+			}(),
+			expectedErrs: 1,
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				require.Equal(t, "spec.commit", errors[0].Field)
+				require.Contains(t, errors.ToAggregate().Error(), "commit options are not supported on local repositories")
+			},
+		},
+		{
+			name: "pull request options for local repository",
+			repository: func() *provisioning.Repository {
+				return &provisioning.Repository{
+					ObjectMeta: metav1.ObjectMeta{
+						Finalizers: []string{CleanFinalizer},
+					},
+					Spec: provisioning.RepositorySpec{
+						Title:       "Test Repo",
+						Type:        provisioning.LocalRepositoryType,
+						PullRequest: &provisioning.PullRequestOptions{TitleTemplate: "{{title}}"},
+					},
+				}
+			}(),
+			expectedErrs: 1,
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				require.Equal(t, "spec.pullRequest", errors[0].Field)
+				require.Contains(t, errors.ToAggregate().Error(), "pull request options are not supported on local repositories")
+			},
+		},
+		{
+			name: "branch, commit and pull request options for local repository",
+			repository: func() *provisioning.Repository {
+				return &provisioning.Repository{
+					ObjectMeta: metav1.ObjectMeta{
+						Finalizers: []string{CleanFinalizer},
+					},
+					Spec: provisioning.RepositorySpec{
+						Title:       "Test Repo",
+						Type:        provisioning.LocalRepositoryType,
+						Branch:      &provisioning.BranchOptions{NameTemplate: "{{title}}"},
+						Commit:      &provisioning.CommitOptions{SingleResourceMessageTemplate: "{{title}}"},
+						PullRequest: &provisioning.PullRequestOptions{TitleTemplate: "{{title}}"},
+					},
+				}
+			}(),
+			expectedErrs: 3,
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				require.Contains(t, errors.ToAggregate().Error(), "branch options are not supported on local repositories")
+				require.Contains(t, errors.ToAggregate().Error(), "commit options are not supported on local repositories")
+				require.Contains(t, errors.ToAggregate().Error(), "pull request options are not supported on local repositories")
+			},
+		},
+		{
+			name: "branch, commit and pull request options allowed for github repository",
+			repository: func() *provisioning.Repository {
+				return &provisioning.Repository{
+					ObjectMeta: metav1.ObjectMeta{
+						Finalizers: []string{CleanFinalizer},
+					},
+					Spec: provisioning.RepositorySpec{
+						Title:       "Test Repo",
+						Type:        provisioning.GitHubRepositoryType,
+						Branch:      &provisioning.BranchOptions{NameTemplate: "{{title}}"},
+						Commit:      &provisioning.CommitOptions{SingleResourceMessageTemplate: "{{title}}"},
+						PullRequest: &provisioning.PullRequestOptions{TitleTemplate: "{{title}}"},
+					},
+				}
+			}(),
+			expectedErrs: 0,
+		},
+		{
+			name: "pull request options for git repository",
+			repository: func() *provisioning.Repository {
+				return &provisioning.Repository{
+					ObjectMeta: metav1.ObjectMeta{
+						Finalizers: []string{CleanFinalizer},
+					},
+					Spec: provisioning.RepositorySpec{
+						Title:       "Test Repo",
+						Type:        provisioning.GitRepositoryType,
+						PullRequest: &provisioning.PullRequestOptions{TitleTemplate: "{{title}}"},
+					},
+				}
+			}(),
+			expectedErrs: 1,
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				require.Equal(t, "spec.pullRequest", errors[0].Field)
+				require.Contains(t, errors.ToAggregate().Error(), "pull request options are not supported on git repositories")
+			},
+		},
+		{
+			name: "branch and commit options allowed for git repository",
+			repository: func() *provisioning.Repository {
+				return &provisioning.Repository{
+					ObjectMeta: metav1.ObjectMeta{
+						Finalizers: []string{CleanFinalizer},
+					},
+					Spec: provisioning.RepositorySpec{
+						Title:  "Test Repo",
+						Type:   provisioning.GitRepositoryType,
+						Branch: &provisioning.BranchOptions{NameTemplate: "{{title}}"},
+						Commit: &provisioning.CommitOptions{SingleResourceMessageTemplate: "{{title}}"},
+					},
+				}
+			}(),
+			expectedErrs: 0,
 		},
 		{
 			name: "invalid workflow in the list",
@@ -387,6 +546,111 @@ func TestValidator_Validate(t *testing.T) {
 	}
 }
 
+func TestValidator_ValidatePrivateEndpoint(t *testing.T) {
+	tests := []struct {
+		name             string
+		repository       *provisioning.Repository
+		allowlistEntries []string
+		wantErrContains  string
+	}{
+		{
+			name: "blocks generic git loopback IP without allowlist",
+			repository: testPrivateEndpointGitRepository(
+				provisioning.GitRepositoryType,
+				"https://127.0.0.1/grafana/grafana.git",
+			),
+			wantErrContains: "repository URL host must resolve to a public or allowed address",
+		},
+		{
+			name: "blocks github DNS resolving to private IP without allowlist",
+			repository: testPrivateEndpointGitRepository(
+				provisioning.GitHubRepositoryType,
+				"https://github.internal.example.com/grafana/grafana",
+			),
+			wantErrContains: "repository URL host must resolve to a public or allowed address",
+		},
+		{
+			name: "allows generic git loopback IP when allowlisted",
+			repository: testPrivateEndpointGitRepository(
+				provisioning.GitRepositoryType,
+				"https://127.0.0.1/grafana/grafana.git",
+			),
+			allowlistEntries: []string{"127.0.0.1"},
+		},
+		{
+			name: "allows github private DNS when hostname is allowlisted",
+			repository: testPrivateEndpointGitRepository(
+				provisioning.GitHubRepositoryType,
+				"https://github.internal.example.com/grafana/grafana",
+			),
+			allowlistEntries: []string{"github.internal.example.com"},
+		},
+		{
+			name: "allows github private DNS when resolved IP is in allowlisted CIDR",
+			repository: testPrivateEndpointGitRepository(
+				provisioning.GitHubRepositoryType,
+				"https://github.internal.example.com/grafana/grafana",
+			),
+			allowlistEntries: []string{"10.0.0.0/24"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockFactory := NewMockFactory(t)
+			mockFactory.EXPECT().Validate(mock.Anything, mock.Anything).Return(field.ErrorList{}).Maybe()
+
+			allowlist, err := NewAllowlist(tt.allowlistEntries)
+			require.NoError(t, err)
+
+			urlValidator := NewURLValidator(allowlist, func(_ context.Context, host string) ([]net.IPAddr, error) {
+				if host == "github.internal.example.com" {
+					return []net.IPAddr{{IP: net.ParseIP("10.0.0.10")}}, nil
+				}
+				return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+			})
+			opts := []ValidatorOption{WithURLValidator(urlValidator)}
+			validator := NewValidator(false, mockFactory, opts...)
+
+			errors := validator.Validate(context.Background(), tt.repository)
+			if tt.wantErrContains != "" {
+				require.NotEmpty(t, errors)
+				require.Contains(t, errors.ToAggregate().Error(), tt.wantErrContains)
+				return
+			}
+			require.Empty(t, errors)
+		})
+	}
+}
+
+func testPrivateEndpointGitRepository(repoType provisioning.RepositoryType, rawURL string) *provisioning.Repository {
+	repo := &provisioning.Repository{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test",
+			Finalizers: []string{CleanFinalizer},
+		},
+		Spec: provisioning.RepositorySpec{
+			Title: "Test Repo",
+			Type:  repoType,
+		},
+	}
+	switch repoType {
+	case provisioning.GitRepositoryType:
+		repo.Spec.Git = &provisioning.GitRepositoryConfig{
+			URL:    rawURL,
+			Branch: "main",
+		}
+	case provisioning.GitHubRepositoryType:
+		repo.Spec.GitHub = &provisioning.GitHubRepositoryConfig{
+			URL:    rawURL,
+			Branch: "main",
+		}
+	default:
+		// Do nothing
+	}
+	return repo
+}
+
 func newAdmissionValidatorTestAttributes(obj, old runtime.Object, op admission.Operation) admission.Attributes {
 	return admission.NewAttributesRecord(
 		obj,
@@ -541,6 +805,106 @@ func TestAdmissionValidator_Validate(t *testing.T) {
 			wantErr:         true,
 			wantErrContains: "Changing sync target after running sync is not supported",
 		},
+		{
+			name: "blocks UPDATE when both old and new objects have the pending-delete label",
+			obj: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test",
+					Finalizers: []string{CleanFinalizer},
+					Labels:     map[string]string{appcontroller.LabelPendingDelete: "true"},
+				},
+				Spec: provisioning.RepositorySpec{
+					Title: "Test Repo (modified)",
+					Type:  provisioning.GitHubRepositoryType,
+				},
+			},
+			old: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "test",
+					Labels: map[string]string{appcontroller.LabelPendingDelete: "true"},
+				},
+				Spec: provisioning.RepositorySpec{
+					Title: "Test Repo",
+					Type:  provisioning.GitHubRepositoryType,
+				},
+			},
+			operation:       admission.Update,
+			wantErr:         true,
+			wantErrContains: "namespace is pending deletion",
+		},
+		{
+			name: "allows UPDATE that removes the pending-delete label (explicit unlock)",
+			obj: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test",
+					Finalizers: []string{CleanFinalizer},
+				},
+				Spec: provisioning.RepositorySpec{
+					Title: "Test Repo",
+					Type:  provisioning.GitHubRepositoryType,
+					Sync:  provisioning.SyncOptions{IntervalSeconds: 60},
+				},
+			},
+			old: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test",
+					Finalizers: []string{CleanFinalizer},
+					Labels:     map[string]string{appcontroller.LabelPendingDelete: "true"},
+				},
+				Spec: provisioning.RepositorySpec{
+					Title: "Test Repo",
+					Type:  provisioning.GitHubRepositoryType,
+					Sync:  provisioning.SyncOptions{IntervalSeconds: 60},
+				},
+			},
+			operation: admission.Update,
+			wantErr:   false,
+		},
+		{
+			name: "allows the UPDATE that sets the pending-delete label (old without label → new with label)",
+			obj: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test",
+					Finalizers: []string{CleanFinalizer},
+					Labels:     map[string]string{appcontroller.LabelPendingDelete: "true"},
+				},
+				Spec: provisioning.RepositorySpec{
+					Title: "Test Repo",
+					Type:  provisioning.GitHubRepositoryType,
+					Sync:  provisioning.SyncOptions{IntervalSeconds: 60},
+				},
+			},
+			old: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test",
+					Finalizers: []string{CleanFinalizer},
+				},
+				Spec: provisioning.RepositorySpec{
+					Title: "Test Repo",
+					Type:  provisioning.GitHubRepositoryType,
+					Sync:  provisioning.SyncOptions{IntervalSeconds: 60},
+				},
+			},
+			operation: admission.Update,
+			wantErr:   false,
+		},
+		{
+			name: "blocks CREATE when incoming object carries the pending-delete label",
+			obj: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test",
+					Finalizers: []string{CleanFinalizer},
+					Labels:     map[string]string{appcontroller.LabelPendingDelete: "true"},
+				},
+				Spec: provisioning.RepositorySpec{
+					Title: "Test Repo",
+					Type:  provisioning.GitHubRepositoryType,
+				},
+			},
+			operation:       admission.Create,
+			wantErr:         true,
+			wantErrContains: "namespace is pending deletion",
+		},
 	}
 
 	for _, tt := range tests {
@@ -630,6 +994,7 @@ func TestAdmissionValidator_RequiresNewTokenWhenURLChanges(t *testing.T) {
 		oldURL          string
 		newURL          string
 		newToken        common.InlineSecureValue
+		connection      string
 		wantErr         bool
 		wantErrContains string
 	}{
@@ -653,6 +1018,29 @@ func TestAdmissionValidator_RequiresNewTokenWhenURLChanges(t *testing.T) {
 			newURL:  "https://github.com/grafana/repo",
 			wantErr: false,
 		},
+		{
+			name:       "allows url change on the same host for a connection-backed repository",
+			oldURL:     "https://github.com/grafana/old",
+			newURL:     "https://github.com/grafana/new",
+			connection: "gh-app",
+			wantErr:    false,
+		},
+		{
+			name:            "rejects url change when the stored token reference is echoed back",
+			oldURL:          "https://github.com/grafana/old",
+			newURL:          "https://github.com/grafana/new",
+			newToken:        common.InlineSecureValue{Name: "old-token"},
+			wantErr:         true,
+			wantErrContains: "secure.token",
+		},
+		{
+			name:            "rejects host change for a connection-backed repository",
+			oldURL:          "https://github.com/grafana/old",
+			newURL:          "https://attacker.example.com/grafana/old",
+			connection:      "gh-app",
+			wantErr:         true,
+			wantErrContains: "secure.token",
+		},
 	}
 
 	for _, tt := range tests {
@@ -671,6 +1059,10 @@ func TestAdmissionValidator_RequiresNewTokenWhenURLChanges(t *testing.T) {
 
 			newRepo := newGitHubRepositoryForURLChangeTest(tt.newURL)
 			newRepo.Secure.Token = tt.newToken
+			if tt.connection != "" {
+				oldRepo.Spec.Connection = &provisioning.ConnectionInfo{Name: tt.connection}
+				newRepo.Spec.Connection = &provisioning.ConnectionInfo{Name: tt.connection}
+			}
 
 			attr := newAdmissionValidatorTestAttributes(newRepo, oldRepo, admission.Update)
 
@@ -678,7 +1070,7 @@ func TestAdmissionValidator_RequiresNewTokenWhenURLChanges(t *testing.T) {
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErrContains)
-				assert.True(t, newRepo.Secure.Token.IsZero(), "old token should not be copied after rejection")
+				assert.Equal(t, tt.newToken, newRepo.Secure.Token, "secure values should not be copied after rejection")
 				return
 			}
 

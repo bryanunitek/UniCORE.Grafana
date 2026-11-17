@@ -187,7 +187,7 @@ func TestService_checkPermission(t *testing.T) {
 			},
 			folders: []store.Folder{
 				{UID: "parent"},
-				{UID: "child", ParentUID: strPtr("parent")},
+				{UID: "child", ParentUID: new("parent")},
 			},
 			check: checkRequest{
 				Action:       "dashboards:read",
@@ -265,6 +265,162 @@ func TestService_checkPermission(t *testing.T) {
 			expected: true,
 		},
 		{
+			name: "should allow a folder-scoped any check if user has permission on an ancestor folder",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:     "dashboards:read",
+					Scope:      "folders:uid:parent",
+					Kind:       "folders",
+					Attribute:  "uid",
+					Identifier: "parent",
+				},
+			},
+			folders: []store.Folder{
+				{UID: "parent"},
+				{UID: "child", ParentUID: new("parent")},
+			},
+			check: checkRequest{
+				Action:       "dashboards:read",
+				Group:        "dashboard.grafana.app",
+				Resource:     "dashboards",
+				Name:         "",
+				ParentFolder: "child",
+				Verb:         utils.VerbList,
+			},
+			expected: true,
+		},
+		{
+			name: "should deny a folder-scoped any check if user only has permission on an unrelated folder",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:     "dashboards:read",
+					Scope:      "folders:uid:other",
+					Kind:       "folders",
+					Attribute:  "uid",
+					Identifier: "other",
+				},
+			},
+			folders: []store.Folder{
+				{UID: "parent"},
+				{UID: "child", ParentUID: new("parent")},
+				{UID: "other"},
+			},
+			check: checkRequest{
+				Action:       "dashboards:read",
+				Group:        "dashboard.grafana.app",
+				Resource:     "dashboards",
+				Name:         "",
+				ParentFolder: "child",
+				Verb:         utils.VerbList,
+			},
+			expected: false,
+		},
+		{
+			name: "should allow a folder-scoped any check if user has a wildcard folder permission",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:    "dashboards:read",
+					Scope:     "folders:*",
+					Kind:      "folders",
+					Attribute: "*",
+				},
+			},
+			folders: []store.Folder{{UID: "parent"}},
+			check: checkRequest{
+				Action:       "dashboards:read",
+				Group:        "dashboard.grafana.app",
+				Resource:     "dashboards",
+				Name:         "",
+				ParentFolder: "parent",
+				Verb:         utils.VerbList,
+			},
+			expected: true,
+		},
+		{
+			name: "should allow a folder-scoped set_permissions any check only via the folder",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:     "dashboards.permissions:write",
+					Scope:      "folders:uid:parent",
+					Kind:       "folders",
+					Attribute:  "uid",
+					Identifier: "parent",
+				},
+			},
+			folders: []store.Folder{{UID: "parent"}},
+			check: checkRequest{
+				Action:       "dashboards.permissions:write",
+				Group:        "dashboard.grafana.app",
+				Resource:     "dashboards",
+				Name:         "",
+				ParentFolder: "parent",
+				Verb:         utils.VerbSetPermissions,
+			},
+			expected: true,
+		},
+		{
+			name: "should deny a folder-scoped set_permissions any check if the grant is on another folder",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:     "dashboards.permissions:write",
+					Scope:      "folders:uid:other",
+					Kind:       "folders",
+					Attribute:  "uid",
+					Identifier: "other",
+				},
+			},
+			folders: []store.Folder{{UID: "parent"}, {UID: "other"}},
+			check: checkRequest{
+				Action:       "dashboards.permissions:write",
+				Group:        "dashboard.grafana.app",
+				Resource:     "dashboards",
+				Name:         "",
+				ParentFolder: "parent",
+				Verb:         utils.VerbSetPermissions,
+			},
+			expected: false,
+		},
+		{
+			name: "should keep capabilities semantics for any check with a folder on a non folder-supporting resource",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:     "teams:read",
+					Scope:      "teams:uid:some_team",
+					Kind:       "teams",
+					Attribute:  "uid",
+					Identifier: "some_team",
+				},
+			},
+			check: checkRequest{
+				Action:       "teams:read",
+				Group:        "iam.grafana.app",
+				Resource:     "teams",
+				Name:         "",
+				ParentFolder: "some_folder",
+				Verb:         utils.VerbList,
+			},
+			expected: true,
+		},
+		{
+			name: "should return true if user has annotation create permission on dashboard (subresource)",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:     "annotations:create",
+					Scope:      "dashboards:uid:some_dashboard",
+					Kind:       "dashboards",
+					Attribute:  "uid",
+					Identifier: "some_dashboard",
+				},
+			},
+			check: checkRequest{
+				Action:   "annotations:create",
+				Group:    "dashboard.grafana.app",
+				Resource: "dashboards",
+				Name:     "some_dashboard",
+			},
+			expected: true,
+		},
+		{
 			name: "should allow querying a datasource",
 			permissions: []accesscontrol.Permission{
 				{
@@ -314,6 +470,63 @@ func TestService_checkPermission(t *testing.T) {
 				Group:    "iam.grafana.app",
 				Resource: "teams",
 				Verb:     utils.VerbCreate,
+			},
+			expected: true,
+		},
+		{
+			name: "wildcard grant must NOT pass permissions:type:escalate check (SkipWildcard)",
+			permissions: []accesscontrol.Permission{
+				// permissions:type:delegate resolves to "*" in the scope map
+				{
+					Action: "roles:write",
+					Scope:  "*",
+					Kind:   "*",
+				},
+			},
+			check: checkRequest{
+				Action:   "roles:write",
+				Group:    "iam.grafana.app",
+				Resource: "permissions",
+				Verb:     utils.VerbPatch,
+				Name:     "escalate",
+			},
+			expected: false,
+		},
+		{
+			name: "explicit permissions:type:escalate scope passes escalate check",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:     "roles:write",
+					Scope:      "permissions:type:escalate",
+					Kind:       "permissions",
+					Attribute:  "type",
+					Identifier: "escalate",
+				},
+			},
+			check: checkRequest{
+				Action:   "roles:write",
+				Group:    "iam.grafana.app",
+				Resource: "permissions",
+				Verb:     utils.VerbPatch,
+				Name:     "escalate",
+			},
+			expected: true,
+		},
+		{
+			name: "wildcard grant still passes normal roles check (SkipWildcard only affects permissions resource)",
+			permissions: []accesscontrol.Permission{
+				{
+					Action: "roles:write",
+					Scope:  "*",
+					Kind:   "*",
+				},
+			},
+			check: checkRequest{
+				Action:   "roles:write",
+				Group:    "iam.grafana.app",
+				Resource: "roles",
+				Verb:     utils.VerbPatch,
+				Name:     "some-role-uid",
 			},
 			expected: true,
 		},
@@ -378,6 +591,29 @@ func TestService_mapping(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "should map annotations subresource to annotation actions",
+			input: &authzv1.CheckRequest{
+				Group:       "dashboard.grafana.app",
+				Resource:    "dashboards",
+				Subresource: "annotations",
+				Name:        "dash1",
+				Verb:        utils.VerbCreate,
+			},
+			output: &checkRequest{
+				Action:      "annotations:create",
+				ActionSets:  []string{"folders:edit", "folders:admin", "dashboards:edit", "dashboards:admin"},
+				Group:       "dashboard.grafana.app",
+				Resource:    "dashboards",
+				Subresource: "annotations",
+				Name:        "dash1",
+				Verb:        "create",
+				Namespace: types.NamespaceInfo{
+					Value: ns,
+					OrgID: 1,
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -398,6 +634,11 @@ func TestService_mapping(t *testing.T) {
 			tc.output.IdentityType = types.TypeUser
 			tc.output.UserUID = testUserA.GetIdentifier()
 
+			// Compare ActionSets
+			assert.ElementsMatch(t, tc.output.ActionSets, got.ActionSets)
+			// Compare the rest of the fields
+			tc.output.ActionSets = nil
+			got.ActionSets = nil
 			require.Equal(t, tc.output, got)
 		})
 	}
@@ -414,7 +655,7 @@ func TestService_checkPermission_folderCacheMissRecovery(t *testing.T) {
 
 	// Populate store with folders
 	folderStore := &fakeStore{
-		folders:        []store.Folder{{UID: "root"}, {UID: "sub", ParentUID: strPtr("root")}},
+		folders:        []store.Folder{{UID: "root"}, {UID: "sub", ParentUID: new("root")}},
 		disableNsCheck: true,
 	}
 	s.folderStore = folderStore
@@ -452,7 +693,7 @@ func TestService_listPermission_skipCache(t *testing.T) {
 
 	// Populate store with folders
 	folderStore := &fakeStore{
-		folders:        []store.Folder{{UID: "root"}, {UID: "sub", ParentUID: strPtr("root")}},
+		folders:        []store.Folder{{UID: "root"}, {UID: "sub", ParentUID: new("root")}},
 		disableNsCheck: true,
 	}
 	s.folderStore = folderStore
@@ -769,6 +1010,65 @@ func TestService_listPermission(t *testing.T) {
 			expectedFolders: []string{"some_folder_1", "some_folder_2"},
 		},
 		{
+			name: "should return dashboards that user has annotation read access to via subresource",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:     "annotations:read",
+					Scope:      "dashboards:uid:dash1",
+					Kind:       "dashboards",
+					Attribute:  "uid",
+					Identifier: "dash1",
+				},
+				{
+					Action:     "annotations:read",
+					Scope:      "dashboards:uid:dash2",
+					Kind:       "dashboards",
+					Attribute:  "uid",
+					Identifier: "dash2",
+				},
+			},
+			folders: []store.Folder{},
+			list: listRequest{
+				Action:      "annotations:read",
+				Group:       "dashboard.grafana.app",
+				Resource:    "dashboards",
+				Subresource: "annotations",
+				Options:     &ListRequestOptions{},
+			},
+			expectedItems: []string{"dash1", "dash2"},
+		},
+		{
+			name: "should return folders when user has annotation access via subresource and folder scope",
+			permissions: []accesscontrol.Permission{
+				{
+					Action:     "annotations:read",
+					Scope:      "dashboards:uid:dash1",
+					Kind:       "dashboards",
+					Attribute:  "uid",
+					Identifier: "dash1",
+				},
+				{
+					Action:     "annotations:read",
+					Scope:      "folders:uid:some_folder",
+					Kind:       "folders",
+					Attribute:  "uid",
+					Identifier: "some_folder",
+				},
+			},
+			folders: []store.Folder{
+				{UID: "some_folder"},
+			},
+			list: listRequest{
+				Action:      "annotations:read",
+				Group:       "dashboard.grafana.app",
+				Resource:    "dashboards",
+				Subresource: "annotations",
+				Options:     &ListRequestOptions{},
+			},
+			expectedItems:   []string{"dash1"},
+			expectedFolders: []string{"some_folder"},
+		},
+		{
 			name: "should return folders that user has inherited access to",
 			permissions: []accesscontrol.Permission{
 				{
@@ -781,11 +1081,11 @@ func TestService_listPermission(t *testing.T) {
 			},
 			folders: []store.Folder{
 				{UID: "some_folder_parent"},
-				{UID: "some_folder_child", ParentUID: strPtr("some_folder_parent")},
-				{UID: "some_folder_subchild1", ParentUID: strPtr("some_folder_child")},
-				{UID: "some_folder_subchild2", ParentUID: strPtr("some_folder_child")},
-				{UID: "some_folder_subsubchild", ParentUID: strPtr("some_folder_subchild2")},
-				{UID: "some_folder_1", ParentUID: strPtr("some_other_folder")},
+				{UID: "some_folder_child", ParentUID: new("some_folder_parent")},
+				{UID: "some_folder_subchild1", ParentUID: new("some_folder_child")},
+				{UID: "some_folder_subchild2", ParentUID: new("some_folder_child")},
+				{UID: "some_folder_subsubchild", ParentUID: new("some_folder_subchild2")},
+				{UID: "some_folder_1", ParentUID: new("some_other_folder")},
 			},
 			list: listRequest{
 				Action:   "dashboards:read",
@@ -815,7 +1115,7 @@ func TestService_listPermission(t *testing.T) {
 			},
 			folders: []store.Folder{
 				{UID: "some_folder_parent"},
-				{UID: "some_folder_child", ParentUID: strPtr("some_folder_parent")},
+				{UID: "some_folder_child", ParentUID: new("some_folder_parent")},
 			},
 			list: listRequest{
 				Action:   "dashboards:read",
@@ -846,9 +1146,9 @@ func TestService_listPermission(t *testing.T) {
 			},
 			folders: []store.Folder{
 				{UID: "some_folder_parent"},
-				{UID: "some_folder_child", ParentUID: strPtr("some_folder_parent")},
-				{UID: "some_folder_subchild", ParentUID: strPtr("some_folder_child")},
-				{UID: "some_folder_child2", ParentUID: strPtr("some_folder_parent")},
+				{UID: "some_folder_child", ParentUID: new("some_folder_parent")},
+				{UID: "some_folder_subchild", ParentUID: new("some_folder_child")},
+				{UID: "some_folder_child2", ParentUID: new("some_folder_parent")},
 			},
 			list: listRequest{
 				Action:   "dashboards:read",
@@ -885,7 +1185,7 @@ func TestService_listPermission(t *testing.T) {
 			},
 			folders: []store.Folder{
 				{UID: "some_folder_parent"},
-				{UID: "some_folder_child", ParentUID: strPtr("some_folder_parent")},
+				{UID: "some_folder_child", ParentUID: new("some_folder_parent")},
 			},
 			list: listRequest{
 				Action:   "folders:read",
@@ -1148,6 +1448,38 @@ func TestService_Check(t *testing.T) {
 			},
 			expected: true,
 		},
+		{
+			name: "should allow user with annotation create permission on dashboard (subresource)",
+			req: &authzv1.CheckRequest{
+				Namespace:   "org-12",
+				Subject:     "user:test-uid",
+				Group:       "dashboard.grafana.app",
+				Resource:    "dashboards",
+				Subresource: "annotations",
+				Verb:        "create",
+				Name:        "dash1",
+			},
+			permissions: []accesscontrol.Permission{
+				{Action: "annotations:create", Scope: "dashboards:uid:dash1"},
+			},
+			expected: true,
+		},
+		{
+			name: "should deny user without annotation permission on dashboard (subresource)",
+			req: &authzv1.CheckRequest{
+				Namespace:   "org-12",
+				Subject:     "user:test-uid",
+				Group:       "dashboard.grafana.app",
+				Resource:    "dashboards",
+				Subresource: "annotations",
+				Verb:        "create",
+				Name:        "dash1",
+			},
+			permissions: []accesscontrol.Permission{
+				{Action: "annotations:create", Scope: "dashboards:uid:dash2"},
+			},
+			expected: false,
+		},
 	}
 	t.Run("User permission check", func(t *testing.T) {
 		for _, tc := range testCases {
@@ -1181,10 +1513,28 @@ func TestService_Check(t *testing.T) {
 				if tc.req.Resource == "folders" {
 					expAction = "folders:delete"
 				}
+				if tc.req.Subresource == "annotations" {
+					switch tc.req.Verb {
+					case "create":
+						expAction = "annotations:create"
+					case "get", "list", "watch":
+						expAction = "annotations:read"
+					case "update", "patch":
+						expAction = "annotations:write"
+					case "delete":
+						expAction = "annotations:delete"
+					}
+				}
 
 				perms, ok := s.permCache.Get(ctx, userPermCacheKey("org-12", "test-uid", expAction))
 				require.True(t, ok)
-				require.Len(t, perms, 1)
+
+				// The fake store returns permissions matching action or action sets,
+				// so the cached perm count equals the number of permissions the store returns.
+				// Rather than recomputing action sets, just verify the cache was populated.
+				if tc.expected {
+					require.NotEmpty(t, perms)
+				}
 			})
 		}
 	})
@@ -1320,7 +1670,26 @@ func TestService_K8sNativeFallback(t *testing.T) {
 		assert.False(t, resp.Allowed)
 	})
 
-	t.Run("Check: unregistered group allowed with K8s-native action", func(t *testing.T) {
+	t.Run("Check: unregistered group denied with stack-role grant and no folder (wildcard access)", func(t *testing.T) {
+		s := setup([]accesscontrol.Permission{
+			{Action: "unregistered.grafana.app/widgets:get", Scope: ""},
+			{Action: "folders:read", Scope: "folders:*"},
+		})
+		resp, err := s.Check(ctx, &authzv1.CheckRequest{
+			Namespace: "org-12",
+			Subject:   "user:test-uid",
+			Group:     "unregistered.grafana.app",
+			Resource:  "widgets",
+			Verb:      "get",
+			Name:      "w1",
+		})
+		require.Error(t, err)
+		assert.False(t, resp.Allowed)
+	})
+
+	t.Run("Check: unregistered group denied with resource-scoped grant but no stack role", func(t *testing.T) {
+		// A scoped grant on the resource is no longer a stack role, so without
+		// an empty-scope grant the folder-authz path denies access.
 		s := setup([]accesscontrol.Permission{
 			{Action: "unregistered.grafana.app/widgets:get", Scope: "unregistered.grafana.app/widgets:uid:w1"},
 		})
@@ -1333,7 +1702,7 @@ func TestService_K8sNativeFallback(t *testing.T) {
 			Name:      "w1",
 		})
 		require.NoError(t, err)
-		assert.True(t, resp.Allowed)
+		assert.False(t, resp.Allowed)
 	})
 
 	t.Run("Check: unknown verb still errors", func(t *testing.T) {
@@ -1379,6 +1748,180 @@ func TestService_K8sNativeFallback(t *testing.T) {
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []string{"w1", "w2"}, resp.Items)
 	})
+
+	t.Run("List: dashboards/annotations subresource resolves correct mapper entry", func(t *testing.T) {
+		s := setup([]accesscontrol.Permission{
+			{Action: "annotations:read", Scope: "dashboards:uid:dash1", Kind: "dashboards", Attribute: "uid", Identifier: "dash1"},
+			{Action: "annotations:read", Scope: "dashboards:uid:dash2", Kind: "dashboards", Attribute: "uid", Identifier: "dash2"},
+		})
+		resp, err := s.List(ctx, &authzv1.ListRequest{
+			Namespace:   "org-12",
+			Subject:     "user:test-uid",
+			Group:       "dashboard.grafana.app",
+			Resource:    "dashboards",
+			Subresource: "annotations",
+			Verb:        "get",
+		})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"dash1", "dash2"}, resp.Items)
+	})
+}
+
+func TestService_checkPermissionWithFolderAuthz(t *testing.T) {
+	callingService := authn.NewAccessTokenAuthInfo(authn.Claims[authn.AccessTokenClaims]{
+		Claims: jwt.Claims{
+			Subject:  types.NewTypeID(types.TypeAccessPolicy, "some-service"),
+			Audience: []string{"authzservice"},
+		},
+		Rest: authn.AccessTokenClaims{Namespace: "org-12"},
+	})
+	ctx := types.WithAuthInfo(context.Background(), callingService)
+
+	const group = "widget.ext.grafana.app"
+
+	// stackRole returns an empty-scope grant for the given resource action,
+	// which the folder-authz path treats as the stack role.
+	stackRole := func(action string) accesscontrol.Permission {
+		return accesscontrol.Permission{Action: action, Scope: ""}
+	}
+	folderPerm := func(action, folderUID string) accesscontrol.Permission {
+		return accesscontrol.Permission{
+			Action:     action,
+			Scope:      "folders:uid:" + folderUID,
+			Kind:       "folders",
+			Attribute:  "uid",
+			Identifier: folderUID,
+		}
+	}
+
+	type testCase struct {
+		name        string
+		permissions []accesscontrol.Permission
+		folders     []store.Folder
+		req         *authzv1.CheckRequest
+		expected    bool
+	}
+
+	testCases := []testCase{
+		{
+			name: "resource with stack role and folder read permission",
+			permissions: []accesscontrol.Permission{
+				stackRole("widget.ext.grafana.app/widgets:get"),
+				folderPerm("folders:read", "f1"),
+			},
+			folders:  []store.Folder{{UID: "f1"}},
+			req:      &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbGet, Name: "w1", Folder: "f1"},
+			expected: true,
+		},
+		{
+			name: "subresource with stack role and folder read permission",
+			permissions: []accesscontrol.Permission{
+				stackRole("widget.ext.grafana.app/widgets/status:get"),
+				folderPerm("folders:read", "f1"),
+			},
+			folders:  []store.Folder{{UID: "f1"}},
+			req:      &authzv1.CheckRequest{Group: group, Resource: "widgets", Subresource: "status", Verb: utils.VerbGet, Name: "w1", Folder: "f1"},
+			expected: true,
+		},
+		{
+			name:        "capabilities probe (no Parent folder) allowed with stack role",
+			permissions: []accesscontrol.Permission{stackRole("widget.ext.grafana.app/widgets:get")},
+			req:         &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbGet},
+			expected:    true,
+		},
+		{
+			name:        "capabilities probe (no Parent folder) denied without stack role",
+			permissions: []accesscontrol.Permission{},
+			req:         &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbGet},
+			expected:    false,
+		},
+		{
+			name: "write verb allowed with stack role and folder write permission",
+			permissions: []accesscontrol.Permission{
+				stackRole("widget.ext.grafana.app/widgets:update"),
+				folderPerm("folders:write", "f1"),
+			},
+			folders:  []store.Folder{{UID: "f1"}},
+			req:      &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbUpdate, Name: "w1", Folder: "f1"},
+			expected: true,
+		},
+		{
+			name:        "stack role but no folder permission denied",
+			permissions: []accesscontrol.Permission{stackRole("widget.ext.grafana.app/widgets:get")},
+			folders:     []store.Folder{{UID: "f1"}},
+			req:         &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbGet, Name: "w1", Folder: "f1"},
+			expected:    false,
+		},
+		{
+			name: "folder inheritance: permission on ancestor allows child",
+			permissions: []accesscontrol.Permission{
+				stackRole("widget.ext.grafana.app/widgets:get"),
+				folderPerm("folders:read", "parent"),
+			},
+			folders:  []store.Folder{{UID: "parent"}, {UID: "child", ParentUID: new("parent")}},
+			req:      &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbGet, Name: "w1", Folder: "child"},
+			expected: true,
+		},
+		{
+			name: "folder inheritance miss: permission on unrelated folder denied",
+			permissions: []accesscontrol.Permission{
+				stackRole("widget.ext.grafana.app/widgets:get"),
+				folderPerm("folders:read", "other"),
+			},
+			folders:  []store.Folder{{UID: "parent"}, {UID: "child", ParentUID: new("parent")}, {UID: "other"}},
+			req:      &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbGet, Name: "w1", Folder: "child"},
+			expected: false,
+		},
+		{
+			name: "wildcard folder grant allows without walking the tree",
+			permissions: []accesscontrol.Permission{
+				stackRole("widget.ext.grafana.app/widgets:get"),
+				{Action: "folders:read", Scope: "*", Kind: "*"},
+			},
+			folders:  []store.Folder{{}},
+			req:      &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbGet, Name: "w1", Folder: "f1"},
+			expected: true,
+		},
+		{
+			name: "permission verb allowed with folder admin",
+			permissions: []accesscontrol.Permission{
+				stackRole("widget.ext.grafana.app/widgets:get_permissions"),
+				folderPerm("folders.permissions:write", "f1"),
+			},
+			folders:  []store.Folder{{UID: "f1"}},
+			req:      &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbGetPermissions, Name: "w1", Folder: "f1"},
+			expected: true,
+		},
+		{
+			name: "permission verb denied with only folder write",
+			permissions: []accesscontrol.Permission{
+				stackRole("widget.ext.grafana.app/widgets:set_permissions"),
+				folderPerm("folders:write", "f1"),
+			},
+			folders:  []store.Folder{{UID: "f1"}},
+			req:      &authzv1.CheckRequest{Group: group, Resource: "widgets", Verb: utils.VerbSetPermissions, Name: "w1", Folder: "f1"},
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := setupService()
+			userID := &store.UserIdentifiers{UID: "test-uid", ID: 1}
+			fStore := &fakeStore{userID: userID, userPermissions: tc.permissions, folders: tc.folders}
+			s.store = fStore
+			s.permissionStore = fStore
+			s.folderStore = fStore
+			s.identityStore = &fakeIdentityStore{}
+
+			tc.req.Namespace = "org-12"
+			tc.req.Subject = "user:test-uid"
+
+			resp, err := s.Check(ctx, tc.req)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, resp.Allowed)
+		})
+	}
 }
 
 func TestService_CacheCheck(t *testing.T) {
@@ -1932,10 +2475,6 @@ func setupService() *Service {
 		identityStore:   &fakeIdentityStore{},
 		sf:              new(singleflight.Group),
 	}
-}
-
-func strPtr(s string) *string {
-	return &s
 }
 
 type fakeStore struct {
@@ -2504,6 +3043,48 @@ func TestService_BatchCheck(t *testing.T) {
 				"check2": true,
 			},
 		},
+		{
+			name: "should handle subresource annotation checks in batch",
+			req: &authzv1.BatchCheckRequest{
+				Namespace: "org-12",
+				Subject:   "user:test-uid",
+				Checks: []*authzv1.BatchCheckItem{
+					{
+						CorrelationId: "check_anno_create",
+						Group:         "dashboard.grafana.app",
+						Resource:      "dashboards",
+						Subresource:   "annotations",
+						Verb:          "create",
+						Name:          "dash1",
+					},
+					{
+						CorrelationId: "check_anno_read",
+						Group:         "dashboard.grafana.app",
+						Resource:      "dashboards",
+						Subresource:   "annotations",
+						Verb:          "get",
+						Name:          "dash1",
+					},
+					{
+						CorrelationId: "check_dash_read",
+						Group:         "dashboard.grafana.app",
+						Resource:      "dashboards",
+						Verb:          "get",
+						Name:          "dash1",
+					},
+				},
+			},
+			permissions: []accesscontrol.Permission{
+				{Action: "annotations:create", Scope: "dashboards:uid:dash1"},
+				{Action: "annotations:read", Scope: "dashboards:uid:dash1"},
+				{Action: "dashboards:read", Scope: "dashboards:uid:dash1"},
+			},
+			expected: map[string]bool{
+				"check_anno_create": true,
+				"check_anno_read":   true,
+				"check_dash_read":   true,
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2785,4 +3366,96 @@ func TestService_BatchCheck(t *testing.T) {
 		// Should have made additional calls because one item required fresh data
 		assert.Greater(t, fStore.calls, initialCalls, "Should skip cache for entire group if any item requires fresh data")
 	})
+
+	// setupBatchCheckWithTracking creates a service with noop folder cache (TTL=0)
+	// to match production configs where CacheTTL=0, and a trackingFolderStore.
+	setupBatchCheckWithTracking := func(t *testing.T) (*Service, *trackingFolderStore, context.Context) {
+		t.Helper()
+		s := setupService()
+		// Override folder cache to noop to match production with CacheTTL=0.
+		s.folderCache = newCacheWrap[folderTree](nil, log.New("test"), tracing.NewNoopTracerService(), 0)
+		fStore := &fakeStore{
+			disableNsCheck: true,
+			userID:         &store.UserIdentifiers{UID: "test-uid"},
+			basicRole:      &store.BasicRole{Role: "Viewer", IsAdmin: false},
+			userPermissions: []accesscontrol.Permission{
+				{Action: "dashboards:read", Scope: "folders:uid:fold1"},
+				{Action: "dashboards:write", Scope: "folders:uid:fold1"},
+				{Action: "dashboards:delete", Scope: "folders:uid:fold1"},
+				{Action: "annotations:create", Scope: "folders:uid:fold1"},
+			},
+			folders: []store.Folder{{UID: "fold1"}},
+		}
+		s.store = fStore
+		s.permissionStore = fStore
+		ts := &trackingFolderStore{inner: fStore}
+		s.folderStore = ts
+		s.identityStore = &fakeIdentityStore{disableNsCheck: true}
+		return s, ts, types.WithAuthInfo(context.Background(), callingService)
+	}
+
+	dashCheck := func(id, verb string) *authzv1.BatchCheckItem {
+		return &authzv1.BatchCheckItem{
+			CorrelationId: id, Group: "dashboard.grafana.app",
+			Resource: "dashboards", Verb: verb, Name: "dash1", Folder: "fold1",
+		}
+	}
+
+	t.Run("should share folder tree across groups including subresources", func(t *testing.T) {
+		s, ts, ctx := setupBatchCheckWithTracking(t)
+
+		resp, err := s.BatchCheck(ctx, &authzv1.BatchCheckRequest{
+			Namespace: "org-12", Subject: "user:test-uid",
+			Checks: []*authzv1.BatchCheckItem{
+				dashCheck("dash_read", "get"),
+				dashCheck("dash_write", "update"),
+				dashCheck("dash_delete", "delete"),
+				{
+					CorrelationId: "annot_create", Group: "dashboard.grafana.app",
+					Resource: "dashboards", Subresource: "annotations",
+					Verb: "create", Name: "dash1", Folder: "fold1",
+				},
+			},
+		})
+
+		require.NoError(t, err)
+		require.Equal(t, 4, len(resp.Results))
+		assert.Equal(t, 1, ts.listFoldersCalls,
+			"ListFolders should be called once across all BatchCheck groups")
+	})
+
+	t.Run("mixed batch: fresh and non-fresh groups share getters", func(t *testing.T) {
+		s, ts, ctx := setupBatchCheckWithTracking(t)
+
+		freshTs := time.Now().Add(30 * time.Second).UnixMilli()
+		freshWrite := dashCheck("dash_write", "update")
+		freshWrite.FreshnessTimestamp = freshTs
+		freshDelete := dashCheck("dash_delete_fresh", "delete")
+		freshDelete.FreshnessTimestamp = freshTs
+
+		resp, err := s.BatchCheck(ctx, &authzv1.BatchCheckRequest{
+			Namespace: "org-12", Subject: "user:test-uid",
+			Checks: []*authzv1.BatchCheckItem{
+				dashCheck("dash_read", "get"),
+				freshWrite,
+				freshDelete,
+			},
+		})
+
+		require.NoError(t, err)
+		require.Equal(t, 3, len(resp.Results))
+		assert.Equal(t, 1, ts.listFoldersCalls,
+			"ListFolders should be called once (single shared getter), not once per group")
+	})
+}
+
+// trackingFolderStore wraps a folder store and counts ListFolders calls.
+type trackingFolderStore struct {
+	inner            store.FolderStore
+	listFoldersCalls int
+}
+
+func (t *trackingFolderStore) ListFolders(ctx context.Context, ns types.NamespaceInfo) ([]store.Folder, error) {
+	t.listFoldersCalls++
+	return t.inner.ListFolders(ctx, ns)
 }

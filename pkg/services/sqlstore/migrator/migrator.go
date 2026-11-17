@@ -5,19 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/grafana/dskit/backoff"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/golang-migrate/migrate/v4/database"
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/atomic"
 
 	"github.com/grafana/grafana/pkg/util/sqlite"
 
@@ -36,11 +35,28 @@ var (
 
 var tracer = otel.Tracer("github.com/grafana/grafana/pkg/services/sqlstore/migrator")
 
+type Migrations interface {
+	AddMigration(id string, m Migration)
+}
+
+// ObsoleteMigrations is a container for migrations that are no longer active
+// These will ONLY run if the corresponding table exists.
+type ObsoleteMigrations struct {
+	Table      string
+	Migrations []Migration
+}
+
+func (o *ObsoleteMigrations) AddMigration(id string, mg Migration) {
+	mg.SetId(id)
+	o.Migrations = append(o.Migrations, mg)
+}
+
 type Migrator struct {
 	DBEngine     *xorm.Engine
 	Dialect      Dialect
 	migrations   []Migration
 	migrationIds map[string]struct{}
+	obsolete     []*ObsoleteMigrations
 	Logger       log.Logger
 	Cfg          *setting.Cfg
 	isLocked     atomic.Bool
@@ -156,6 +172,10 @@ func (mg *Migrator) AddMigration(id string, m Migration) {
 	mg.migrationIds[id] = struct{}{}
 }
 
+func (mg *Migrator) AddObsoleteMigration(m *ObsoleteMigrations) {
+	mg.obsolete = append(mg.obsolete, m)
+}
+
 func (mg *Migrator) GetMigrationIDs(excludeNotLogged bool) []string {
 	result := make([]string, 0, len(mg.migrations))
 	for _, migration := range mg.migrations {
@@ -205,7 +225,7 @@ func (mg *Migrator) RunMigrations(ctx context.Context, isDatabaseLockingEnabled 
 	if err != nil {
 		return err
 	}
-	key, err := database.GenerateAdvisoryLockId(dbName)
+	key, err := GenerateAdvisoryLockID(dbName)
 	if err != nil {
 		return err
 	}
@@ -236,6 +256,25 @@ func (mg *Migrator) RunMigrations(ctx context.Context, isDatabaseLockingEnabled 
 		// migration will run inside a nested transaction
 		return mg.run(ctx)
 	})
+}
+
+func (mg *Migrator) addObsoleteMigrations() error {
+	for _, o := range mg.obsolete {
+		exists, err := mg.DBEngine.IsTableExist(o.Table)
+		if err != nil {
+			return fmt.Errorf("failed to check obsolete table existence: %w", err)
+		}
+		if !exists {
+			continue
+		}
+		for _, m := range o.Migrations {
+			if _, ok := mg.migrationIds[m.Id()]; ok {
+				continue
+			}
+			mg.AddMigration(m.Id(), m)
+		}
+	}
+	return nil
 }
 
 func (mg *Migrator) run(ctx context.Context) (err error) {
@@ -272,6 +311,10 @@ func (mg *Migrator) run(ctx context.Context) (err error) {
 	}
 
 	successLabel := prometheus.Labels{"success": "true"}
+
+	if err := mg.addObsoleteMigrations(); err != nil {
+		return err
+	}
 
 	migrationsPerformed := 0
 	migrationsSkipped := 0

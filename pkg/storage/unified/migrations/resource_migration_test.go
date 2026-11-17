@@ -14,7 +14,6 @@ import (
 	"github.com/google/uuid"
 	authlib "github.com/grafana/authlib/types"
 	"github.com/grafana/dskit/services"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -80,12 +79,26 @@ func testDef(gr schema.GroupResource, lockTables, renameTables []string) Migrati
 	}
 }
 
-func newRunner(t *testing.T, locker MigrationTableLocker, renamer MigrationTableRenamer, def MigrationDefinition) (*MigrationRunner, *MockUnifiedMigrator) {
+func newRunner(t *testing.T, locker MigrationTableLocker, renamer MigrationTableRenamer, def MigrationDefinition) (*MigrationRunner, *fakeUnifiedMigrator) {
 	t.Helper()
-	m := NewMockUnifiedMigrator(t)
-	m.EXPECT().Migrate(mock.Anything, mock.Anything).Return(&resourcepb.BulkResponse{}, nil).Maybe()
-	m.EXPECT().RebuildIndexes(mock.Anything, mock.Anything).Return(nil).Maybe()
-	return NewMigrationRunner(m, locker, renamer, setting.NewCfg(), def, nil), m
+	return newRunnerCfg(t, setting.NewCfg(), locker, renamer, def)
+}
+
+func newRunnerCfg(t *testing.T, cfg *setting.Cfg, locker MigrationTableLocker, renamer MigrationTableRenamer, def MigrationDefinition) (*MigrationRunner, *fakeUnifiedMigrator) {
+	t.Helper()
+	fake := &fakeUnifiedMigrator{
+		migrateResponse: &resourcepb.BulkResponse{},
+	}
+	return NewMigrationRunner(fake, locker, renamer, cfg, def, nil), fake
+}
+
+// cfgMigrationLockingDisabled: [unified_storage] migration_locking = false.
+func cfgMigrationLockingDisabled(t *testing.T) *setting.Cfg {
+	t.Helper()
+	cfg := setting.NewCfg()
+	_, err := cfg.Raw.Section("unified_storage").NewKey("migration_locking", "false")
+	require.NoError(t, err)
+	return cfg
 }
 
 func ensureOrg(t *testing.T, engine *xorm.Engine) {
@@ -242,6 +255,48 @@ func TestIntegrationRun_Rename(t *testing.T) {
 			} else {
 				assertNotRenamed(t, env.engine, tables[0])
 			}
+		})
+	}
+}
+
+// With migration_locking=false, rename must be skipped. On MySQL the lock-dependent rename would
+// otherwise hang until the deadline; the short waitDeadline makes a regression fail fast.
+func TestIntegrationRun_LockingDisabledSkipsRename(t *testing.T) {
+	env := newTestEnv(t)
+
+	cases := []struct {
+		name    string
+		skip    func() bool
+		renamer func() MigrationTableRenamer
+	}{
+		{
+			name:    "MySQL",
+			skip:    func() bool { return !db.IsTestDbMySQL() },
+			renamer: func() MigrationTableRenamer { return &mysqlTableRenamer{log: logger, waitDeadline: 2 * time.Second} },
+		},
+		{
+			name:    "Postgres",
+			skip:    func() bool { return !db.IsTestDbPostgres() },
+			renamer: func() MigrationTableRenamer { return &transactionalTableRenamer{log: logger} },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.skip() {
+				t.Skip("skipped for this DB type")
+			}
+
+			table := uniqueTable(t, env.engine)
+			locker := newTableLocker(env.store, legacysql.NewDatabaseProvider(env.store), false)
+			require.IsType(t, &noopTableLocker{}, locker)
+
+			// RenameTables configured, but disabled locking must force renaming off.
+			def := testDef(dummyGR(), []string{table}, []string{table})
+			runner, _ := newRunnerCfg(t, cfgMigrationLockingDisabled(t), locker, tc.renamer(), def)
+			runMigration(t, env.engine, runner, env.engine.DriverName())
+
+			assertNotRenamed(t, env.engine, table)
 		})
 	}
 }
@@ -429,7 +484,7 @@ func TestIntegrationRunMySQL_CrashRecovery(t *testing.T) {
 	runMigration(t, env.engine, runner, migrator.MySQL)
 
 	// Recovery restores tables, then full migration re-runs including rename
-	m.AssertCalled(t, "Migrate", mock.Anything, mock.Anything)
+	require.Greater(t, m.migrateCalled, 0)
 	assertRenamed(t, env.engine, t1, t2)
 }
 
@@ -669,7 +724,7 @@ func newRetryTestResourceServerWithSearch(t *testing.T, backend resource.Storage
 		},
 	}
 
-	searchOpts, err := search.NewSearchOptions(featuremgmt.WithFeatures(), cfg, docBuilders, nil, nil)
+	searchOpts, err := search.NewSearchOptions(featuremgmt.WithFeatures(), cfg, docBuilders, nil, nil, nil)
 	require.NoError(t, err)
 
 	return resource.NewResourceServer(resource.ResourceServerOptions{
@@ -930,10 +985,8 @@ func TestIntegrationIsAlreadyOnUnifiedStorage(t *testing.T) {
 		t.Helper()
 		cfg := setting.NewCfg()
 		cfg.DataPath = dataPath
-		m := NewMockUnifiedMigrator(t)
-		m.EXPECT().Migrate(mock.Anything, mock.Anything).Return(&resourcepb.BulkResponse{}, nil).Maybe()
-		m.EXPECT().RebuildIndexes(mock.Anything, mock.Anything).Return(nil).Maybe()
-		return NewMigrationRunner(m, noopLocker(), &transactionalTableRenamer{log: logger}, cfg, def, nil)
+		fake := &fakeUnifiedMigrator{migrateResponse: &resourcepb.BulkResponse{}}
+		return NewMigrationRunner(fake, noopLocker(), &transactionalTableRenamer{log: logger}, cfg, def, nil)
 	}
 
 	runner, _ := newRunner(t, noopLocker(), &transactionalTableRenamer{log: logger}, def)
@@ -1077,13 +1130,13 @@ func TestIntegrationIsAlreadyOnUnifiedStorage(t *testing.T) {
 		insertKVState(t, configKey, migratedStatus)
 		runner2, fake := newRunner(t, noopLocker(), &transactionalTableRenamer{log: logger}, def)
 		runMigration(t, env.engine, runner2, migrator.SQLite)
-		fake.AssertNotCalled(t, "Migrate", mock.Anything, mock.Anything)
+		require.Equal(t, 0, fake.migrateCalled, "Migrate should not be called when already on unified storage")
 	})
 
 	t.Run("Run proceeds with migration when not on unified storage", func(t *testing.T) {
 		insertKVState(t, configKey, dualwriteStorageStatus{ReadUnified: false, WriteUnified: false, Migrated: 0})
 		runner2, fake := newRunner(t, noopLocker(), &transactionalTableRenamer{log: logger}, def)
 		runMigration(t, env.engine, runner2, migrator.SQLite)
-		fake.AssertNumberOfCalls(t, "Migrate", 1)
+		require.Equal(t, 1, fake.migrateCalled, "Migrate should be called when not on unified storage")
 	})
 }

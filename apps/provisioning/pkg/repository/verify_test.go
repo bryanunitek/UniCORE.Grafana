@@ -76,7 +76,72 @@ func TestVerifyAgainstExistingRepositoriesValidator_Validate(t *testing.T) {
 				},
 			},
 			wantErr:         true,
-			wantErrContains: "Cannot create folder repository when instance repository exists",
+			wantErrContains: "Cannot create repository when instance repository exists",
+			maxRepositories: 10,
+		},
+		{
+			name: "forbids folderless sync when instance repo exists",
+			cfg: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{Name: "new-repo", Namespace: "default"},
+				Spec: provisioning.RepositorySpec{
+					Sync: provisioning.SyncOptions{Target: provisioning.SyncTargetTypeFolderless},
+				},
+			},
+			existingRepos: []provisioning.Repository{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "instance-repo"},
+					Spec: provisioning.RepositorySpec{
+						Sync: provisioning.SyncOptions{Target: provisioning.SyncTargetTypeInstance},
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "Cannot create repository when instance repository exists",
+			maxRepositories: 10,
+		},
+		{
+			name: "forbids instance sync when folderless repo exists",
+			cfg: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{Name: "new-repo", Namespace: "default"},
+				Spec: provisioning.RepositorySpec{
+					Sync: provisioning.SyncOptions{Target: provisioning.SyncTargetTypeInstance},
+				},
+			},
+			existingRepos: []provisioning.Repository{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "folderless-repo"},
+					Spec: provisioning.RepositorySpec{
+						Sync: provisioning.SyncOptions{Target: provisioning.SyncTargetTypeFolderless},
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "Instance repository can only be created when no other repositories exist",
+			maxRepositories: 10,
+		},
+		{
+			name: "allows folderless sync coexisting with folder and folderless repos",
+			cfg: &provisioning.Repository{
+				ObjectMeta: metav1.ObjectMeta{Name: "new-repo", Namespace: "default"},
+				Spec: provisioning.RepositorySpec{
+					Sync: provisioning.SyncOptions{Target: provisioning.SyncTargetTypeFolderless},
+				},
+			},
+			existingRepos: []provisioning.Repository{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "folder-repo"},
+					Spec: provisioning.RepositorySpec{
+						Sync: provisioning.SyncOptions{Target: provisioning.SyncTargetTypeFolder},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "folderless-repo"},
+					Spec: provisioning.RepositorySpec{
+						Sync: provisioning.SyncOptions{Target: provisioning.SyncTargetTypeFolderless},
+					},
+				},
+			},
+			wantErr:         false,
 			maxRepositories: 10,
 		},
 		{
@@ -661,7 +726,7 @@ func TestVerifyAgainstExistingRepositoriesValidator_Validate(t *testing.T) {
 			},
 			existingRepos: func() []provisioning.Repository {
 				repos := make([]provisioning.Repository, 10)
-				for i := 0; i < 10; i++ {
+				for i := range 10 {
 					repos[i] = provisioning.Repository{
 						ObjectMeta: metav1.ObjectMeta{Name: "repo-" + string(rune('a'+i))},
 					}
@@ -680,7 +745,7 @@ func TestVerifyAgainstExistingRepositoriesValidator_Validate(t *testing.T) {
 			},
 			existingRepos: func() []provisioning.Repository {
 				repos := make([]provisioning.Repository, 10)
-				for i := 0; i < 10; i++ {
+				for i := range 10 {
 					repos[i] = provisioning.Repository{
 						ObjectMeta: metav1.ObjectMeta{Name: "existing-repo"},
 					}
@@ -702,7 +767,7 @@ func TestVerifyAgainstExistingRepositoriesValidator_Validate(t *testing.T) {
 			existingRepos: func() []provisioning.Repository {
 				// 15 repos exist but the limit is 5 — quota was lowered after creation
 				repos := make([]provisioning.Repository, 15)
-				for i := 0; i < 15; i++ {
+				for i := range 15 {
 					repos[i] = provisioning.Repository{
 						ObjectMeta: metav1.ObjectMeta{Name: "repo-" + string(rune('a'+i))},
 					}
@@ -724,7 +789,7 @@ func TestVerifyAgainstExistingRepositoriesValidator_Validate(t *testing.T) {
 			},
 			existingRepos: func() []provisioning.Repository {
 				repos := make([]provisioning.Repository, 20)
-				for i := 0; i < 20; i++ {
+				for i := range 20 {
 					repos[i] = provisioning.Repository{
 						ObjectMeta: metav1.ObjectMeta{Name: "repo-" + string(rune('a'+i))},
 					}
@@ -742,7 +807,7 @@ func TestVerifyAgainstExistingRepositoriesValidator_Validate(t *testing.T) {
 			},
 			existingRepos: func() []provisioning.Repository {
 				repos := make([]provisioning.Repository, 5)
-				for i := 0; i < 5; i++ {
+				for i := range 5 {
 					repos[i] = provisioning.Repository{
 						ObjectMeta: metav1.ObjectMeta{Name: "repo-" + string(rune('a'+i))},
 					}

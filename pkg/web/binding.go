@@ -48,7 +48,7 @@ func validate(obj any) error {
 	t := reflect.TypeOf(obj)
 	v := reflect.ValueOf(obj)
 
-	if v.Kind() == reflect.Ptr && v.IsNil() {
+	if v.Kind() == reflect.Pointer && v.IsNil() {
 		return nil
 	}
 
@@ -59,7 +59,7 @@ func validate(obj any) error {
 
 	// Otherwise, use reflection to match `binding:"Required"` struct field tags.
 	// Resolve all pointers and interfaces, until we get a concrete type.
-	for v.Kind() == reflect.Interface || v.Kind() == reflect.Ptr {
+	for v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer {
 		t = t.Elem()
 		v = v.Elem()
 	}

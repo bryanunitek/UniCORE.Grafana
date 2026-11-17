@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	authlib "github.com/grafana/authlib/types"
 	"github.com/grafana/grafana-app-sdk/logging"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	dashboard "github.com/grafana/grafana/apps/dashboard/pkg/apis/dashboard/v1"
 	provisioning "github.com/grafana/grafana/apps/provisioning/pkg/apis/provisioning/v0alpha1"
 	"github.com/grafana/grafana/apps/provisioning/pkg/repository"
@@ -61,6 +65,10 @@ type fileChangeInfo struct {
 	// URL where we can see a preview of this particular change
 	PreviewURL           string
 	PreviewScreenshotURL string
+
+	// HasRemovedMetadata is true when the original file contains metadata
+	// fields (namespace, labels, annotations) that will be removed when parsing the resource.
+	HasRemovedMetadata bool
 }
 
 // URLProvider yields the two base URLs Grafana uses when referring to itself
@@ -114,6 +122,7 @@ func (e *evaluator) Evaluate(ctx context.Context, repo repository.Reader, opts p
 		MissingImageRenderer: !rendererAvailable,
 	}
 	screenshotBaseURL := e.urls.Public(ctx, cfg.Namespace)
+	orgID := orgIDForLinks(cfg.Namespace)
 
 	logger := logging.FromContext(ctx)
 
@@ -127,7 +136,7 @@ func (e *evaluator) Evaluate(ctx context.Context, repo repository.Reader, opts p
 
 		progress.SetMessage(ctx, fmt.Sprintf("process %s", change.Path))
 		logger.With("action", change.Action).With("path", change.Path)
-		info.Changes = append(info.Changes, e.evaluateFile(ctx, repo, info.GrafanaBaseURL, screenshotBaseURL, change, opts, parser, shouldRender))
+		info.Changes = append(info.Changes, e.evaluateFile(ctx, repo, info.GrafanaBaseURL, screenshotBaseURL, orgID, change, opts, parser, shouldRender))
 	}
 
 	return info, nil
@@ -135,9 +144,21 @@ func (e *evaluator) Evaluate(ctx context.Context, repo repository.Reader, opts p
 
 var dashboardKind = dashboard.DashboardResourceInfo.GroupVersionKind().Kind
 
-func (e *evaluator) evaluateFile(ctx context.Context, repo repository.Reader, baseURL string, screenshotBaseURL string, change repository.VersionedFileChange, opts provisioning.PullRequestJobOptions, parser resources.Parser, shouldRender bool) fileChangeInfo {
+// orgIDForLinks returns the org to pin on PR-comment links when the repo lives
+// in a non-primary org (on-prem org-N, N>=2). Main org (default), Cloud
+// (stacks-N) and unresolved namespaces return 0, leaving links unscoped since
+// the viewer's default org already resolves them.
+func orgIDForLinks(namespace string) int64 {
+	ns, err := authlib.ParseNamespace(namespace)
+	if err != nil || ns.OrgID <= 1 {
+		return 0
+	}
+	return ns.OrgID
+}
+
+func (e *evaluator) evaluateFile(ctx context.Context, repo repository.Reader, baseURL string, screenshotBaseURL string, orgID int64, change repository.VersionedFileChange, opts provisioning.PullRequestJobOptions, parser resources.Parser, shouldRender bool) fileChangeInfo {
 	if change.Action == repository.FileActionDeleted {
-		return e.evaluateDeletedFile(ctx, repo, baseURL, change, parser)
+		return e.evaluateDeletedFile(ctx, repo, baseURL, orgID, change, parser)
 	}
 
 	info := fileChangeInfo{Change: change}
@@ -153,6 +174,19 @@ func (e *evaluator) evaluateFile(ctx context.Context, repo repository.Reader, ba
 	if err != nil {
 		info.Error = err.Error()
 		return info
+	}
+
+	if change.Action == repository.FileActionUpdated {
+		// Detect metadata stripped by resource parser.
+		// Read the file from the default branch (empty ref) and compare its
+		// metadata against the PR-branch parsed version.
+		baseFileInfo, baseErr := repo.Read(ctx, change.Path, "")
+		if baseErr == nil && baseFileInfo != nil {
+			baseObj, _, _, parseErr := resources.ParseFileResource(ctx, baseFileInfo)
+			if parseErr == nil && baseObj != nil {
+				info.HasRemovedMetadata = hasRemovedMetadata(baseObj, info.Parsed.Obj)
+			}
+		}
 	}
 
 	// Find a name within the file
@@ -179,6 +213,11 @@ func (e *evaluator) evaluateFile(ctx context.Context, repo repository.Reader, ba
 
 		if info.Parsed.Existing != nil {
 			grafanaURL := urlBuilder.JoinPath("d", obj.GetName(), slugify.Slugify(info.Title))
+			if orgID > 0 {
+				query := url.Values{}
+				query.Set("orgId", strconv.FormatInt(orgID, 10))
+				grafanaURL.RawQuery = query.Encode()
+			}
 			info.GrafanaURL = grafanaURL.String()
 		}
 
@@ -190,6 +229,9 @@ func (e *evaluator) evaluateFile(ctx context.Context, repo repository.Reader, ba
 		query.Set("ref", info.Parsed.Info.Ref)
 		if opts.URL != "" {
 			query.Set("pull_request_url", url.QueryEscape(opts.URL))
+		}
+		if orgID > 0 {
+			query.Set("orgId", strconv.FormatInt(orgID, 10))
 		}
 		info.PreviewURL += "?" + query.Encode()
 		if shouldRender {
@@ -214,7 +256,7 @@ func (e *evaluator) evaluateFile(ctx context.Context, repo repository.Reader, ba
 
 // evaluateDeletedFile is best-effort: it tries to read and parse the file at
 // the previous ref to extract metadata (kind, title, GrafanaURL)
-func (e *evaluator) evaluateDeletedFile(ctx context.Context, repo repository.Reader, baseURL string, change repository.VersionedFileChange, parser resources.Parser) fileChangeInfo {
+func (e *evaluator) evaluateDeletedFile(ctx context.Context, repo repository.Reader, baseURL string, orgID int64, change repository.VersionedFileChange, parser resources.Parser) fileChangeInfo {
 	info := fileChangeInfo{Change: change}
 
 	fileInfo, err := repo.Read(ctx, change.Path, change.PreviousRef)
@@ -237,6 +279,11 @@ func (e *evaluator) evaluateDeletedFile(ctx context.Context, repo repository.Rea
 		}
 		if info.Parsed.Existing != nil {
 			grafanaURL := urlBuilder.JoinPath("d", obj.GetName(), slugify.Slugify(info.Title))
+			if orgID > 0 {
+				query := url.Values{}
+				query.Set("orgId", strconv.FormatInt(orgID, 10))
+				grafanaURL.RawQuery = query.Encode()
+			}
 			info.GrafanaURL = grafanaURL.String()
 		}
 	}
@@ -261,7 +308,13 @@ func renderScreenshotFromGrafanaURL(ctx context.Context,
 		logging.FromContext(ctx).Warn("invalid", "url", grafanaURL, "err", err)
 		return "", err
 	}
-	snap, err := renderer.RenderScreenshot(ctx, repo, strings.TrimPrefix(parsed.Path, "/"), parsed.Query())
+	// orgId belongs only on the human-facing comment link, where OrgRedirect
+	// switches the viewer's org on click. The render callback already
+	// authenticates in the repository's org via the render-service identity, so
+	// an orgId here would make OrgRedirect try to switch the render user instead.
+	query := parsed.Query()
+	query.Del("orgId")
+	snap, err := renderer.RenderScreenshot(ctx, repo, strings.TrimPrefix(parsed.Path, "/"), query)
 	if err != nil {
 		logging.FromContext(ctx).Warn("render failed", "url", grafanaURL, "err", err)
 		return "", fmt.Errorf("error rendering screenshot: %w", err)
@@ -276,4 +329,30 @@ func renderScreenshotFromGrafanaURL(ctx context.Context,
 	}
 	outcome = utils.SuccessOutcome
 	return base.JoinPath(snap).String(), nil
+}
+
+// hasRemovedMetadata returns true if the original object (from the file)
+// contains metadata fields (namespace, labels, annotations) that are absent
+// or different in the parsed object (post-Parse).
+func hasRemovedMetadata(original, parsed *unstructured.Unstructured) bool {
+	if original.GetNamespace() != "" && parsed.GetNamespace() != original.GetNamespace() {
+		return true
+	}
+	if len(original.GetLabels()) > 0 && hasMissingKeys(original.GetLabels(), parsed.GetLabels()) {
+		return true
+	}
+	if len(original.GetAnnotations()) > 0 && hasMissingKeys(original.GetAnnotations(), parsed.GetAnnotations()) {
+		return true
+	}
+	return false
+}
+
+// hasMissingKeys returns true if any key in original is absent from parsed.
+func hasMissingKeys(original, parsed map[string]string) bool {
+	for k := range original {
+		if _, exists := parsed[k]; !exists {
+			return true
+		}
+	}
+	return false
 }

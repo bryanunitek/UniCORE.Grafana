@@ -8,13 +8,15 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/grafana/grafana/pkg/apimachinery/utils"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/admission"
 
+	provisioningadmission "github.com/grafana/grafana/apps/provisioning/pkg/apis/admission"
 	provisioning "github.com/grafana/grafana/apps/provisioning/pkg/apis/provisioning/v0alpha1"
-	"github.com/grafana/grafana/pkg/apimachinery/utils"
+	"github.com/grafana/grafana/apps/provisioning/pkg/util"
 )
 
 // Validator is the interface for repository validation.
@@ -27,15 +29,28 @@ type Validator interface {
 type RepositoryValidator struct {
 	allowImageRendering bool
 	repoFactory         Factory
+	urlValidator        *URLValidator
 }
+
+type ValidatorOption func(*RepositoryValidator)
 
 // FIXME: The separation of concerns here is not ideal. RepositoryValidator should not depend on Factory,
 // but we need to call Factory.Validate() for structural validation (URL, branch, path, etc.) before
 // doing configuration validation. This coupling was introduced to avoid more extensive refactoring.
-func NewValidator(allowImageRendering bool, repoFactory Factory) Validator {
-	return &RepositoryValidator{
+func NewValidator(allowImageRendering bool, repoFactory Factory, opts ...ValidatorOption) Validator {
+	v := &RepositoryValidator{
 		allowImageRendering: allowImageRendering,
 		repoFactory:         repoFactory,
+	}
+	for _, opt := range opts {
+		opt(v)
+	}
+	return v
+}
+
+func WithURLValidator(urlValidator *URLValidator) ValidatorOption {
+	return func(v *RepositoryValidator) {
+		v.urlValidator = urlValidator
 	}
 }
 
@@ -75,10 +90,17 @@ func (v *RepositoryValidator) Validate(ctx context.Context, cfg *provisioning.Re
 			cfg.Spec.GitHub, "Github config only valid when type is github"))
 	}
 
+	if cfg.Spec.Type != provisioning.GitHubEnterpriseRepositoryType && cfg.Spec.GitHubEnterprise != nil {
+		list = append(list, field.Invalid(field.NewPath("spec", "githubEnterprise"),
+			cfg.Spec.GitHubEnterprise, "GitHub Enterprise config only valid when type is githubEnterprise"))
+	}
+
 	if cfg.Spec.Type != provisioning.GitRepositoryType && cfg.Spec.Git != nil {
 		list = append(list, field.Invalid(field.NewPath("spec", "git"),
 			cfg.Spec.Git, "Git config only valid when type is git"))
 	}
+
+	list = append(list, validateWorkflowOptions(cfg)...)
 
 	for _, w := range cfg.Spec.Workflows {
 		switch w {
@@ -128,18 +150,97 @@ func (v *RepositoryValidator) Validate(ctx context.Context, cfg *provisioning.Re
 		}
 	}
 
-	if !v.allowImageRendering && cfg.Spec.GitHub != nil && cfg.Spec.GitHub.GenerateDashboardPreviews {
-		list = append(list,
-			field.Invalid(field.NewPath("spec", "generateDashboardPreviews"),
-				cfg.Spec.GitHub.GenerateDashboardPreviews,
-				"image rendering is not enabled"))
-	}
+	list = append(list, v.validateDashboardPreviews(cfg)...)
 
 	if cfg.Spec.Webhook != nil && cfg.Spec.Webhook.BaseURL != "" {
 		list = append(list, validateWebhookBaseURL(cfg.Spec.Webhook.BaseURL)...)
 	}
+	list = append(list, v.validatePrivateEndpoint(ctx, cfg)...)
 
 	return list
+}
+
+func (v *RepositoryValidator) validatePrivateEndpoint(ctx context.Context, cfg *provisioning.Repository) field.ErrorList {
+	rawURL := cfg.URL()
+	if rawURL == "" {
+		return nil
+	}
+
+	if !hasURLHost(rawURL) {
+		return nil
+	}
+
+	// No validator is configured, the URL is not validated.
+	if util.IsInterfaceNil(v.urlValidator) {
+		return nil
+	}
+
+	if err := v.urlValidator.ValidateURL(ctx, rawURL); err != nil {
+		return field.ErrorList{
+			field.Invalid(
+				field.NewPath("spec", string(cfg.Spec.Type), "url"),
+				rawURL,
+				"repository URL host must resolve to a public or allowed address",
+			),
+		}
+	}
+
+	return nil
+}
+
+func hasURLHost(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	return err == nil && parsed.Hostname() != ""
+}
+
+// validateWorkflowOptions rejects branch, commit and pull request options on repository
+// types that cannot use them. These options are only meaningful for the branch workflow
+// (git-only), and pull requests additionally require a hosting provider. Rejecting them
+// avoids silently storing configuration that can never take effect.
+func validateWorkflowOptions(cfg *provisioning.Repository) field.ErrorList {
+	var list field.ErrorList
+
+	switch cfg.Spec.Type {
+	case provisioning.LocalRepositoryType:
+		// Local repositories support neither the branch workflow nor pull requests.
+		if cfg.Spec.Branch != nil {
+			list = append(list, field.Invalid(field.NewPath("spec", "branch"),
+				cfg.Spec.Branch, "branch options are not supported on local repositories"))
+		}
+		if cfg.Spec.Commit != nil {
+			list = append(list, field.Invalid(field.NewPath("spec", "commit"),
+				cfg.Spec.Commit, "commit options are not supported on local repositories"))
+		}
+		if cfg.Spec.PullRequest != nil {
+			list = append(list, field.Invalid(field.NewPath("spec", "pullRequest"),
+				cfg.Spec.PullRequest, "pull request options are not supported on local repositories"))
+		}
+	case provisioning.GitRepositoryType:
+		// Plain git supports the branch workflow but cannot open pull requests.
+		if cfg.Spec.PullRequest != nil {
+			list = append(list, field.Invalid(field.NewPath("spec", "pullRequest"),
+				cfg.Spec.PullRequest, "pull request options are not supported on git repositories"))
+		}
+	default:
+		// Hosting providers (github, githubEnterprise, bitbucket, gitlab) support all options.
+	}
+
+	return list
+}
+
+func (v *RepositoryValidator) validateDashboardPreviews(cfg *provisioning.Repository) field.ErrorList {
+	if v.allowImageRendering {
+		return nil
+	}
+	if cfg.Spec.GitHub != nil && cfg.Spec.GitHub.GenerateDashboardPreviews {
+		return field.ErrorList{field.Invalid(field.NewPath("spec", "generateDashboardPreviews"),
+			cfg.Spec.GitHub.GenerateDashboardPreviews, "image rendering is not enabled")}
+	}
+	if cfg.Spec.GitHubEnterprise != nil && cfg.Spec.GitHubEnterprise.GenerateDashboardPreviews {
+		return field.ErrorList{field.Invalid(field.NewPath("spec", "generateDashboardPreviews"),
+			cfg.Spec.GitHubEnterprise.GenerateDashboardPreviews, "image rendering is not enabled")}
+	}
+	return nil
 }
 
 func validateWebhookBaseURL(baseURL string) field.ErrorList {
@@ -223,6 +324,12 @@ func (v *AdmissionValidator) Validate(ctx context.Context, a admission.Attribute
 	meta, _ := utils.MetaAccessor(obj)
 	if meta.GetDeletionTimestamp() != nil {
 		return nil
+	}
+
+	// Block creations of pending-deleted resources and mutations on resources whose namespace is pending deletion.
+	// Allows for updates that remove the pending-delete label (explicit unlock).
+	if err := provisioningadmission.ValidatePendingDeletion(a, meta); err != nil {
+		return err
 	}
 
 	r, ok := obj.(*provisioning.Repository)

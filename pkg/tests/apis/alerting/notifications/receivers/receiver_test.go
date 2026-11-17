@@ -12,15 +12,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/grafana/alerting/notify/notifytest"
-	"github.com/grafana/alerting/receivers/line"
-	"github.com/grafana/alerting/receivers/schema"
-	"github.com/grafana/grafana-app-sdk/resource"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/grafana/alerting/notify/notifytest"
+	"github.com/grafana/alerting/receivers/line"
+	"github.com/grafana/alerting/receivers/schema"
+	"github.com/grafana/alerting/receivers/threema"
+	"github.com/grafana/grafana-app-sdk/resource"
 
 	"github.com/grafana/alerting/notify"
 
@@ -1130,7 +1132,7 @@ func TestIntegrationOptimisticConcurrency(t *testing.T) {
 
 		err = oldClient.Delete(ctx, actual.Name, v1.DeleteOptions{
 			Preconditions: &v1.Preconditions{
-				ResourceVersion: util.Pointer("something"),
+				ResourceVersion: new("something"),
 			},
 		})
 		require.Truef(t, errors.IsConflict(err), "should get conflict error but got %s", err)
@@ -1141,7 +1143,7 @@ func TestIntegrationOptimisticConcurrency(t *testing.T) {
 
 		err = oldClient.Delete(ctx, actual.Name, v1.DeleteOptions{
 			Preconditions: &v1.Preconditions{
-				ResourceVersion: util.Pointer(actual.ResourceVersion),
+				ResourceVersion: new(actual.ResourceVersion),
 			},
 		})
 		require.NoError(t, err)
@@ -1152,7 +1154,7 @@ func TestIntegrationOptimisticConcurrency(t *testing.T) {
 
 		err = oldClient.Delete(ctx, actual.Name, v1.DeleteOptions{
 			Preconditions: &v1.Preconditions{
-				ResourceVersion: util.Pointer(actual.ResourceVersion),
+				ResourceVersion: new(actual.ResourceVersion),
 			},
 		})
 		require.NoError(t, err)
@@ -1400,23 +1402,33 @@ func TestIntegrationCRUD(t *testing.T) {
 	t.Run("should be able to update default receiver", func(t *testing.T) {
 		require.NotNil(t, defaultReceiver)
 		newDefault := defaultReceiver.Copy().(*v1beta1.Receiver)
-		newDefault.Spec.Integrations = append(newDefault.Spec.Integrations, createIntegration(t, line.Type))
+		newDefault.Spec.Integrations = append(newDefault.Spec.Integrations, createIntegration(t, threema.Type))
 
 		updatedReceiver, err := adminClient.Update(ctx, newDefault, resource.UpdateOptions{})
 		require.NoError(t, err)
 
 		expected := newDefault.Copy().(*v1beta1.Receiver)
-		lineIntegration := expected.Spec.Integrations[0]
-		lineIntegration.SecureFields = map[string]bool{
-			"token": true,
+		integration := expected.Spec.Integrations[0]
+		integration.SecureFields = map[string]bool{
+			"api_secret": true,
 		}
-		delete(lineIntegration.Settings, "token")
-		assert.Equal(t, "LINE", updatedReceiver.Spec.Integrations[0].Type) // this type is in the schema but not in backend
-		lineIntegration.Type = "LINE"
-		lineIntegration.Uid = updatedReceiver.Spec.Integrations[0].Uid
-		expected.Spec.Integrations[0] = lineIntegration
+		delete(integration.Settings, "api_secret")
+		integration.Uid = updatedReceiver.Spec.Integrations[0].Uid
+		expected.Spec.Integrations[0] = integration
 
 		assert.Equal(t, expected.Spec, updatedReceiver.Spec)
+	})
+
+	t.Run("should not be able to add an integration version that cannot be created", func(t *testing.T) {
+		require.NotNil(t, defaultReceiver)
+		current, err := adminClient.Get(ctx, defaultReceiver.GetStaticMetadata().Identifier())
+		require.NoError(t, err)
+
+		withLine := current.Copy().(*v1beta1.Receiver)
+		withLine.Spec.Integrations = append(withLine.Spec.Integrations, createIntegration(t, line.Type))
+
+		_, err = adminClient.Update(ctx, withLine, resource.UpdateOptions{})
+		require.Truef(t, errors.IsBadRequest(err), "Expected BadRequest, got: %s", err)
 	})
 
 	t.Run("should fail to create receiver with the existing name", func(t *testing.T) {
@@ -1445,6 +1457,9 @@ func TestIntegrationCRUD(t *testing.T) {
 		keys := slices.Collect(keysIter)
 		slices.Sort(keys)
 		for _, key := range keys {
+			if !canCreateV1(t, key) {
+				continue
+			}
 			integrations = append(integrations, createIntegration(t, key))
 		}
 		var err error
@@ -1482,6 +1497,7 @@ func TestIntegrationCRUD(t *testing.T) {
 	})
 
 	t.Run("should be able read what it is created", func(t *testing.T) {
+		require.NotNil(t, receiver)
 		get, err := adminClient.Get(ctx, receiver.GetStaticMetadata().Identifier())
 		require.NoError(t, err)
 		require.Equal(t, receiver, get)
@@ -1667,7 +1683,7 @@ func persistInitialConfig(t *testing.T, amConfig definitions.PostableUserConfig,
 			toCreate.Spec.Integrations = append(toCreate.Spec.Integrations, v1beta1.ReceiverIntegration{
 				Settings:              settings.Object,
 				Type:                  integration.Type,
-				DisableResolveMessage: util.Pointer(false),
+				DisableResolveMessage: new(false),
 			})
 		}
 
@@ -1682,6 +1698,153 @@ func persistInitialConfig(t *testing.T, amConfig definitions.PostableUserConfig,
 	test_common.UpdateDefaultRoute(t, user, amConfig.AlertmanagerConfig.Route)
 }
 
+func TestIntegrationAllowedIntegrations(t *testing.T) {
+	testutil.SkipIntegrationTestInShortMode(t)
+
+	ctx := context.Background()
+	helper := apis.NewK8sTestHelper(t, testinfra.GrafanaOpts{
+		UnifiedAlertingAllowedIntegrations: []string{"slack"},
+	})
+	client, err := v1beta1.NewReceiverClientFromGenerator(helper.Org1.Admin.GetClientRegistry())
+	require.NoError(t, err)
+
+	newReceiver := func(title string, integrationType schema.IntegrationType) *v1beta1.Receiver {
+		return &v1beta1.Receiver{
+			ObjectMeta: v1.ObjectMeta{Namespace: "default"},
+			Spec: v1beta1.ReceiverSpec{
+				Title:        title,
+				Integrations: []v1beta1.ReceiverIntegration{createIntegration(t, integrationType)},
+			},
+		}
+	}
+
+	t.Run("create with disallowed integration type is rejected", func(t *testing.T) {
+		_, err := client.Create(ctx, newReceiver("disallowed-email", schema.EmailType), resource.CreateOptions{})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "integration type email is not allowed")
+	})
+
+	t.Run("create with allowed integration type succeeds", func(t *testing.T) {
+		created, err := client.Create(ctx, newReceiver("allowed-slack", schema.SlackType), resource.CreateOptions{})
+		require.NoError(t, err)
+		require.NotEmpty(t, created.Name)
+		require.NoError(t, client.Delete(ctx, created.GetStaticMetadata().Identifier(), resource.DeleteOptions{}))
+	})
+
+	t.Run("create with mixed integrations is rejected and names the disallowed one", func(t *testing.T) {
+		mixed := &v1beta1.Receiver{
+			ObjectMeta: v1.ObjectMeta{Namespace: "default"},
+			Spec: v1beta1.ReceiverSpec{
+				Title: "mixed-slack-and-email",
+				Integrations: []v1beta1.ReceiverIntegration{
+					createIntegration(t, schema.SlackType),
+					createIntegration(t, schema.EmailType),
+				},
+			},
+		}
+		_, err := client.Create(ctx, mixed, resource.CreateOptions{})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "integration type email is not allowed")
+	})
+}
+
+func TestIntegrationEmailValidation(t *testing.T) {
+	testutil.SkipIntegrationTestInShortMode(t)
+
+	ctx := context.Background()
+	helper := apis.NewK8sTestHelper(t, testinfra.GrafanaOpts{
+		UnifiedAlertingEmailsToOrgOnly: true,
+	})
+
+	adminClient, err := v1beta1.NewReceiverClientFromGenerator(helper.Org1.Admin.GetClientRegistry())
+	require.NoError(t, err)
+
+	const emailAddress = "orgmember@example.com"
+
+	emailIntegration := createIntegrationWithSettings(t, schema.EmailType, schema.V1, `{"addresses":"`+emailAddress+`"}`)
+
+	newReceiver := func(title string) *v1beta1.Receiver {
+		return &v1beta1.Receiver{
+			ObjectMeta: v1.ObjectMeta{Namespace: "default"},
+			Spec: v1beta1.ReceiverSpec{
+				Title:        title,
+				Integrations: []v1beta1.ReceiverIntegration{emailIntegration},
+			},
+		}
+	}
+
+	t.Run("create with email not in org is rejected", func(t *testing.T) {
+		_, err := adminClient.Create(ctx, newReceiver("email-not-in-org"), resource.CreateOptions{})
+		require.Truef(t, errors.IsBadRequest(err), "expected bad request but got: %v", err)
+	})
+
+	helper.CreateUser("orgmember", apis.Org1, org.RoleViewer, []resourcepermissions.SetResourcePermissionCommand{})
+
+	t.Run("create with email belonging to an org member succeeds", func(t *testing.T) {
+		created, err := adminClient.Create(ctx, newReceiver("email-in-org"), resource.CreateOptions{})
+		require.NoError(t, err)
+
+		t.Run("update with email not in org is rejected", func(t *testing.T) {
+			updated := created.Copy().(*v1beta1.Receiver)
+			unknownEmail := createIntegrationWithSettings(t, schema.EmailType, schema.V1, `{"addresses":"unknown@example.com"}`)
+			updated.Spec.Integrations = []v1beta1.ReceiverIntegration{unknownEmail}
+			_, err := adminClient.Update(ctx, updated, resource.UpdateOptions{})
+			require.Truef(t, errors.IsBadRequest(err), "expected bad request but got: %v", err)
+		})
+
+		t.Run("update with email belonging to an org member succeeds", func(t *testing.T) {
+			existing, err := adminClient.Get(ctx, created.GetStaticMetadata().Identifier())
+			require.NoError(t, err)
+			_, err = adminClient.Update(ctx, existing, resource.UpdateOptions{})
+			require.NoError(t, err)
+		})
+	})
+
+	t.Run("create with email belonging to a user in a different org is rejected", func(t *testing.T) {
+		otherOrgUser := helper.CreateUser("otherorguser", apis.Org2, org.RoleViewer, []resourcepermissions.SetResourcePermissionCommand{})
+		otherOrgEmail := otherOrgUser.Identity.GetEmail()
+		require.NotEmpty(t, otherOrgEmail, "expected Org2 user to have a non-empty email")
+
+		otherOrgIntegration := createIntegrationWithSettings(t, schema.EmailType, schema.V1, `{"addresses":"`+otherOrgEmail+`"}`)
+		receiver := &v1beta1.Receiver{
+			ObjectMeta: v1.ObjectMeta{Namespace: "default"},
+			Spec: v1beta1.ReceiverSpec{
+				Title:        "email-in-other-org",
+				Integrations: []v1beta1.ReceiverIntegration{otherOrgIntegration},
+			},
+		}
+		_, err := adminClient.Create(ctx, receiver, resource.CreateOptions{})
+		require.Truef(t, errors.IsBadRequest(err), "expected bad request but got: %v", err)
+	})
+
+	t.Run("create with email belonging to a user who is a member of both orgs succeeds", func(t *testing.T) {
+		multiOrgUser := helper.CreateUser("multiorguser", apis.Org2, org.RoleViewer, []resourcepermissions.SetResourcePermissionCommand{})
+		helper.AddUserToOrg(multiOrgUser, apis.Org1, org.RoleViewer)
+		multiOrgEmail := multiOrgUser.Identity.GetEmail()
+		require.NotEmpty(t, multiOrgEmail, "expected multi-org user to have a non-empty email")
+
+		multiOrgIntegration := createIntegrationWithSettings(t, schema.EmailType, schema.V1, `{"addresses":"`+multiOrgEmail+`"}`)
+		receiver := &v1beta1.Receiver{
+			ObjectMeta: v1.ObjectMeta{Namespace: "default"},
+			Spec: v1beta1.ReceiverSpec{
+				Title:        "email-in-both-orgs",
+				Integrations: []v1beta1.ReceiverIntegration{multiOrgIntegration},
+			},
+		}
+		_, err := adminClient.Create(ctx, receiver, resource.CreateOptions{})
+		require.NoError(t, err, "expected Org1 admin to be able to use the email of a user who is a member of Org1 (even if Org2 is their default org)")
+	})
+}
+
+// canCreateV1 reports whether the v1 schema of integrationType may still be used in a new
+// integration. Deprecated versions are rejected by the API, so tests must not send them.
+func canCreateV1(t *testing.T, integrationType schema.IntegrationType) bool {
+	t.Helper()
+	version, ok := notify.GetSchemaVersionForIntegration(integrationType, schema.V1)
+	require.Truef(t, ok, "no v1 schema for integration type %s", integrationType)
+	return version.CanCreate
+}
+
 func createIntegration(t *testing.T, integrationType schema.IntegrationType) v1beta1.ReceiverIntegration {
 	cfg, ok := notifytest.AllKnownV1ConfigsForTesting[integrationType]
 	require.Truef(t, ok, "no known config for integration type %s", integrationType)
@@ -1694,7 +1857,7 @@ func createIntegrationWithSettings(t *testing.T, integrationType schema.Integrat
 		Settings:              settings.Object,
 		Type:                  string(integrationType),
 		Version:               string(integrationVersion),
-		DisableResolveMessage: util.Pointer(false),
+		DisableResolveMessage: new(false),
 	}
 }
 

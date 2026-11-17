@@ -14,14 +14,16 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/grafana/grafana-plugin-sdk-go/backend"
-	"github.com/grafana/grafana-plugin-sdk-go/backend/tracing"
-	"github.com/grafana/grafana-plugin-sdk-go/data"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/tracing"
+	"github.com/grafana/grafana-plugin-sdk-go/config"
+	"github.com/grafana/grafana-plugin-sdk-go/data"
 	"github.com/grafana/grafana/pkg/tsdb/azuremonitor/kinds/dataquery"
 	"github.com/grafana/grafana/pkg/tsdb/azuremonitor/macros"
 	"github.com/grafana/grafana/pkg/tsdb/azuremonitor/types"
@@ -126,7 +128,7 @@ func (e *AzureLogAnalyticsDatasource) ResourceRequest(rw http.ResponseWriter, re
 		// Add necessary query params
 		queryParams.Add("select", "categories,solutions,tables,workspaces")
 		req.URL.RawQuery = queryParams.Encode()
-		resp, err := cli.Do(req)
+		resp, err := cli.Do(req) // #nosec G704 -- datasource client targets operator-configured URL
 		if err != nil {
 			statusCode := http.StatusInternalServerError
 			if resp != nil {
@@ -391,7 +393,7 @@ func (e *AzureLogAnalyticsDatasource) buildQuery(ctx context.Context, query back
 
 	if query.QueryType == string(dataquery.AzureQueryTypeAzureTraces) || query.QueryType == string(dataquery.AzureQueryTypeTraceExemplar) {
 		if query.QueryType == string(dataquery.AzureQueryTypeTraceExemplar) {
-			cfg := backend.GrafanaConfigFromContext(ctx)
+			cfg := config.GrafanaConfigFromContext(ctx)
 			hasPromExemplarsToggle := cfg.FeatureToggles().IsEnabled("azureMonitorPrometheusExemplars")
 			if !hasPromExemplarsToggle {
 				return nil, backend.DownstreamError(fmt.Errorf("query type unsupported as azureMonitorPrometheusExemplars feature toggle is not enabled"))
@@ -477,7 +479,7 @@ func (e *AzureLogAnalyticsDatasource) executeQuery(ctx context.Context, query *A
 		return nil, err
 	}
 
-	logLimitDisabled := backend.GrafanaConfigFromContext(ctx).FeatureToggles().IsEnabled("azureMonitorDisableLogLimit")
+	logLimitDisabled := config.GrafanaConfigFromContext(ctx).FeatureToggles().IsEnabled("azureMonitorDisableLogLimit")
 
 	frame, err := ResponseTableToFrame(t, query.RefID, query.Query, query.QueryType, query.ResultFormat, logLimitDisabled)
 	if err != nil {
@@ -757,20 +759,32 @@ func getTracesQueryUrl(azurePortalUrl string) (string, error) {
 }
 
 func getCorrelationWorkspaces(ctx context.Context, baseResource string, resourcesMap map[string]bool, dsInfo types.DatasourceInfo, operationId string) (map[string]bool, error) {
-	azMonService := dsInfo.Services["Azure Monitor"]
-	correlationUrl := azMonService.URL + fmt.Sprintf("%s/providers/microsoft.insights/transactions/%s", baseResource, operationId)
+	if err := validateAzureResourcePath(baseResource); err != nil {
+		return nil, err
+	}
+	if err := validateTraceOperationID(operationId); err != nil {
+		return nil, err
+	}
 
-	callCorrelationAPI := func(url string) (AzureCorrelationAPIResponse, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer([]byte{}))
+	azMonService := dsInfo.Services["Azure Monitor"]
+	baseURL, err := url.Parse(azMonService.URL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Azure Monitor URL: %w", err)
+	}
+	if baseURL.Host == "" {
+		return nil, fmt.Errorf("invalid Azure Monitor URL: missing host")
+	}
+	correlationUrl := baseURL.JoinPath(baseResource, "providers", "microsoft.insights", "transactions", operationId).String()
+
+	callCorrelationAPI := func(requestURL string) (AzureCorrelationAPIResponse, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 		if err != nil {
 			return AzureCorrelationAPIResponse{}, fmt.Errorf("%v: %w", "failed to create request", err)
 		}
-		req.URL.Path = url
 		req.Header.Set("Content-Type", "application/json")
 		values := req.URL.Query()
 		values.Add("api-version", "2019-10-17-preview")
 		req.URL.RawQuery = values.Encode()
-		req.Method = "GET"
 
 		_, span := tracing.DefaultTracer().Start(ctx, "azure traces correlation request", trace.WithAttributes(
 			attribute.String("target", req.URL.String()),
@@ -820,7 +834,7 @@ func getCorrelationWorkspaces(ctx context.Context, baseResource string, resource
 	var nextLink *string
 	var correlationResponse AzureCorrelationAPIResponse
 
-	correlationResponse, err := callCorrelationAPI(correlationUrl)
+	correlationResponse, err = callCorrelationAPI(correlationUrl)
 	if err != nil {
 		return nil, err
 	}
@@ -851,10 +865,6 @@ func (ar *AzureLogAnalyticsResponse) GetPrimaryResultTable() (*types.AzureRespon
 }
 
 func (e *AzureLogAnalyticsDatasource) unmarshalResponse(res *http.Response) (AzureLogAnalyticsResponse, error) {
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return AzureLogAnalyticsResponse{}, err
-	}
 	defer func() {
 		if err := res.Body.Close(); err != nil {
 			e.Logger.Warn("Failed to close response body", "err", err)
@@ -862,14 +872,20 @@ func (e *AzureLogAnalyticsDatasource) unmarshalResponse(res *http.Response) (Azu
 	}()
 
 	if res.StatusCode/100 != 2 {
+		body, readErr := io.ReadAll(res.Body)
+		if readErr != nil {
+			return AzureLogAnalyticsResponse{}, fmt.Errorf("non-2xx response %s and failed to read body: %w", res.Status, readErr)
+		}
 		return AzureLogAnalyticsResponse{}, utils.CreateResponseErrorFromStatusCode(res.StatusCode, res.Status, body)
 	}
 
 	var data AzureLogAnalyticsResponse
-	d := json.NewDecoder(bytes.NewReader(body))
+	// UseNumber preserves int64 precision; downstream converters in
+	// azure-response-table-frame.go type-assert cells to json.Number and
+	// fail on any other numeric type, so this must stay.
+	d := json.NewDecoder(res.Body)
 	d.UseNumber()
-	err = d.Decode(&data)
-	if err != nil {
+	if err := d.Decode(&data); err != nil {
 		return AzureLogAnalyticsResponse{}, err
 	}
 
@@ -882,10 +898,17 @@ type LogAnalyticsMeta struct {
 	AzurePortalLink string   `json:"azurePortalLink,omitempty"`
 }
 
+var gzipWriterPool = sync.Pool{
+	New: func() any { return gzip.NewWriter(io.Discard) },
+}
+
 // encodeQuery encodes the query in gzip so the frontend can build links.
 func encodeQuery(rawQuery string) (string, error) {
 	var b bytes.Buffer
-	gz := gzip.NewWriter(&b)
+	gz := gzipWriterPool.Get().(*gzip.Writer)
+	defer gzipWriterPool.Put(gz)
+	gz.Reset(&b)
+
 	if _, err := gz.Write([]byte(rawQuery)); err != nil {
 		return "", err
 	}

@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -238,6 +236,8 @@ func TestIntegrationAnnotations(t *testing.T) {
 				}
 			}
 			items[0].Tags = []string{"type:test"}
+			items[1].Tags = []string{"type:test", "env:prod"}
+			items[2].Tags = []string{"env:prod"}
 
 			err := store.AddMany(context.Background(), items)
 
@@ -247,6 +247,13 @@ func TestIntegrationAnnotations(t *testing.T) {
 			inserted, err := store.Get(context.Background(), query, accRes)
 			require.NoError(t, err)
 			assert.Len(t, inserted, count)
+
+			tags, err := store.GetTags(context.Background(), annotations.TagsQuery{OrgID: 101})
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []*annotations.TagsDTO{
+				{Tag: "env:prod", Count: 2},
+				{Tag: "type:test", Count: 2},
+			}, tags.Tags)
 		})
 
 		t.Run("Can query for annotation by id", func(t *testing.T) {
@@ -461,6 +468,17 @@ func TestIntegrationAnnotations(t *testing.T) {
 			assert.Equal(t, []string{"newtag1", "newtag3"}, items[0].Tags)
 			assert.Equal(t, "something new", items[0].Text)
 			assert.Greater(t, items[0].Updated, items[0].Created)
+
+			var linkedTags []string
+			err = sql.WithDbSession(context.Background(), func(dbSession *db.Session) error {
+				return dbSession.SQL(
+					"SELECT tag.key FROM annotation_tag JOIN tag ON tag.id = annotation_tag.tag_id WHERE annotation_tag.annotation_id = ?",
+					annotationId,
+				).Find(&linkedTags)
+			})
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []string{"newtag1", "newtag3"}, linkedTags,
+				"replaced tags must be deleted from annotation_tag, not just from annotation.tags")
 		})
 
 		t.Run("Can update annotations with data", func(t *testing.T) {
@@ -639,144 +657,30 @@ func TestIntegrationAnnotations(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, result.Tags, 0)
 		})
-	})
-}
 
-func TestIntegrationAnnotationsAlwaysOnMigrations(t *testing.T) {
-	tutil.SkipIntegrationTestInShortMode(t)
-
-	sql := db.InitTestDB(t)
-	cfg := setting.NewCfg()
-	cfg.AnnotationMaximumTagsLength = 60
-
-	t.Run("NewXormStore should call triggerAlwaysOnMigrations and skip migrations", func(t *testing.T) {
-		cfg.Raw.Section("database").Key("skip_dashboard_uid_migration_on_startup").SetValue("true")
-
-		l := log.New("annotation.test")
-
-		dashboard := &dashboards.Dashboard{
-			UID: "test-skip-uid", OrgID: 1, Title: "Test Skip Dashboard", Version: 1,
-			Created: time.Now(), Updated: time.Now(), Data: simplejson.New(),
-		}
-		require.NoError(t, sql.WithDbSession(context.Background(), func(sess *db.Session) error {
-			_, err := sess.Insert(dashboard)
-			return err
-		}))
-
-		tempStore := NewXormStore(cfg, l, sql, tagimpl.ProvideService(sql), nil)
-		annotation := &annotations.Item{
-			OrgID:        1,
-			UserID:       1,
-			DashboardID:  dashboard.ID, // nolint: staticcheck
-			DashboardUID: dashboard.UID,
-			Text:         "test migration skip",
-			Type:         "alert",
-			Epoch:        100,
-		}
-		err := tempStore.Add(context.Background(), annotation)
-		require.NoError(t, err)
-
-		t.Cleanup(func() {
-			err := tempStore.Delete(context.Background(), &annotations.DeleteParams{ID: annotation.ID, OrgID: 1})
-			assert.NoError(t, err)
-		})
-
-		err = sql.WithDbSession(context.Background(), func(sess *db.Session) error {
-			_, err := sess.Exec("UPDATE annotation SET dashboard_uid = NULL WHERE id = ?", annotation.ID)
-			return err
-		})
-		require.NoError(t, err)
-
-		xormMigrationTrigger = sync.Once{}
-		store := NewXormStore(cfg, l, sql, tagimpl.ProvideService(sql), prometheus.NewRegistry())
-
-		require.NotNil(t, store)
-		assert.Equal(t, "sql", store.Type())
-
-		var result struct {
-			DashboardUID *string `xorm:"dashboard_uid"`
-		}
-		err = sql.WithDbSession(context.Background(), func(sess *db.Session) error {
-			has, err := sess.Table("annotation").
-				Where("id = ?", annotation.ID).
-				Get(&result)
-			if err != nil {
-				return err
+		t.Run("insertTagsIgnoringConflicts tolerates duplicate annotation_tag rows", func(t *testing.T) {
+			annotation := &annotations.Item{
+				OrgID:  1,
+				UserID: 1,
+				Text:   "test duplicate tags",
+				Epoch:  10,
+				Tags:   []string{"alertname:cpu", "severity:critical"},
 			}
-			if !has {
-				return fmt.Errorf("annotation not found")
-			}
-			return nil
-		})
-		require.NoError(t, err)
-		assert.Nil(t, result.DashboardUID, "dashboard_uid should still be NULL when migration is skipped")
-	})
+			err := store.Add(t.Context(), annotation)
+			require.NoError(t, err)
 
-	t.Run("NewXormStore should call triggerAlwaysOnMigrations and run migrations", func(t *testing.T) {
-		cfg.Raw.Section("database").Key("skip_dashboard_uid_migration_on_startup").SetValue("false")
-		l := log.New("annotation.test")
-
-		dashboard := &dashboards.Dashboard{
-			UID: "test-run-uid", OrgID: 1, Title: "Test Run Dashboard", Version: 1,
-			Created: time.Now(), Updated: time.Now(), Data: simplejson.New(),
-		}
-		require.NoError(t, sql.WithDbSession(context.Background(), func(sess *db.Session) error {
-			_, err := sess.Insert(dashboard)
-			return err
-		}))
-
-		tempStore := NewXormStore(cfg, l, sql, tagimpl.ProvideService(sql), nil)
-		annotation := &annotations.Item{
-			OrgID:        1,
-			UserID:       1,
-			DashboardID:  dashboard.ID, // nolint: staticcheck
-			DashboardUID: dashboard.UID,
-			Text:         "test migration run",
-			Type:         "alert",
-			Epoch:        100,
-		}
-		err := tempStore.Add(context.Background(), annotation)
-		require.NoError(t, err)
-
-		t.Cleanup(func() {
-			err := tempStore.Delete(context.Background(), &annotations.DeleteParams{ID: annotation.ID, OrgID: 1})
-			assert.NoError(t, err)
-		})
-
-		err = sql.WithDbSession(context.Background(), func(sess *db.Session) error {
-			_, err := sess.Exec("UPDATE annotation SET dashboard_uid = NULL WHERE id = ?", annotation.ID)
-			return err
-		})
-		require.NoError(t, err)
-
-		xormMigrationTrigger = sync.Once{}
-		store := NewXormStore(cfg, l, sql, tagimpl.ProvideService(sql), prometheus.NewRegistry())
-
-		require.NotNil(t, store)
-		assert.Equal(t, "sql", store.Type())
-
-		// Wait for the async migration to complete (runs in background goroutine)
-		var result struct {
-			DashboardUID *string `xorm:"dashboard_uid"`
-		}
-		require.Eventually(t, func() bool {
-			err = sql.WithDbSession(context.Background(), func(sess *db.Session) error {
-				has, err := sess.Table("annotation").
-					Where("id = ?", annotation.ID).
-					Get(&result)
-				if err != nil {
-					return err
-				}
-				if !has {
-					return fmt.Errorf("annotation not found")
-				}
-				return nil
+			var existingTags []annotationTag
+			err = sql.WithDbSession(t.Context(), func(sess *sqlstore.DBSession) error {
+				return sess.SQL("SELECT annotation_id, tag_id FROM annotation_tag WHERE annotation_id = ?", annotation.ID).Find(&existingTags)
 			})
-			if err != nil {
-				return false
-			}
-			return result.DashboardUID != nil && *result.DashboardUID == "test-run-uid"
-		}, 5*time.Second, 100*time.Millisecond, "dashboard_uid should be populated when migration runs")
+			require.NoError(t, err)
+			require.Len(t, existingTags, 2)
+
+			err = sql.WithDbSession(t.Context(), func(sess *sqlstore.DBSession) error {
+				return store.insertTagsIgnoringConflicts(sess, existingTags)
+			})
+			require.NoError(t, err)
+		})
 	})
 }
 
@@ -856,7 +760,7 @@ func benchmarkFindTags(b *testing.B, numAnnotations int) {
 	require.NoError(b, err)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		result, err := store.GetTags(context.Background(), annotations.TagsQuery{
 			OrgID: 1,
 			Tag:   "outage",

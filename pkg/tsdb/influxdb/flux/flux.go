@@ -8,19 +8,17 @@ import (
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
 
-	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/tsdb/influxdb/models"
 )
 
 var (
-	glog = log.New("tsdb.influx_flux")
+	glog = backend.NewLoggerWith("logger", "tsdb.influx_flux")
 )
 
 // Query builds flux queries, executes them, and returns the results.
 func Query(ctx context.Context, dsInfo *models.DatasourceInfo, tsdbQuery backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	logger := glog.FromContext(ctx)
 	tRes := backend.NewQueryDataResponse()
-	logger.Debug("Received a query", "query", tsdbQuery)
 	r, err := runnerFromDataSource(dsInfo)
 	if err != nil {
 		return &backend.QueryDataResponse{}, err

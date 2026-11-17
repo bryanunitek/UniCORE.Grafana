@@ -180,7 +180,7 @@ func (l *LibraryElementService) CreateElement(c context.Context, signedInUser id
 	}
 
 	err = l.SQLStore.WithTransactionalDbSession(c, func(session *db.Session) error {
-		allowed, err := l.AccessControl.Evaluate(c, signedInUser, ac.EvalPermission(ActionLibraryPanelsCreate, dashboards.ScopeFoldersProvider.GetResourceScopeUID(folderUID)))
+		allowed, err := l.AccessControl.Evaluate(c, signedInUser, ac.EvalPermission(ActionLibraryPanelsCreate, folder.ScopeFoldersProvider.GetResourceScopeUID(folderUID)))
 		if err != nil {
 			return err
 		}
@@ -466,10 +466,14 @@ func (l *LibraryElementService) getAllLibraryElements(c context.Context, signedI
 		}
 
 		metrics.MFolderIDsServiceCount.WithLabelValues(metrics.LibraryElements).Inc()
-		// Get the folder tree filtered by user permissions (cached per user per request)
-		folderTree, err := l.treeCache.get(c, signedInUser)
-		if err != nil {
-			return err
+		needsFolderTree := !query.SkipFolderTreeForAdmin || !signedInUser.HasRole(org.RoleAdmin)
+		var folderTree *folder.FolderTree
+		if needsFolderTree {
+			// Get the folder tree filtered by user permissions (cached per user per request)
+			folderTree, err = l.treeCache.get(c, signedInUser)
+			if err != nil {
+				return err
+			}
 		}
 
 		// Filter elements based on folder access using the tree
@@ -479,9 +483,12 @@ func (l *LibraryElementService) getAllLibraryElements(c context.Context, signedI
 					continue
 				}
 			}
-			title := folderTree.GetTitle(element.FolderUID)
-			if title == "" {
-				title = dashboards.RootFolderName
+			var title string
+			if needsFolderTree {
+				title = folderTree.GetTitle(element.FolderUID)
+				if title == "" {
+					title = dashboards.RootFolderName
+				}
 			}
 			retDTOs = append(retDTOs, model.LibraryElementDTO{
 				ID:          element.ID,
@@ -608,6 +615,30 @@ func (l *LibraryElementService) PatchLibraryElement(c context.Context, signedInU
 		}
 		if f.ManagedBy == utils.ManagerKindRepo {
 			return model.LibraryElementDTO{}, model.ErrLibraryElementProvisionedFolder
+		}
+
+		// The destination folder must allow the caller to create library
+		// panels there. The route-level authorize guard only checks
+		// library.panels:write on the element itself, so without this check
+		// a caller with edit rights on the element could relocate it into
+		// any folder, including ones they cannot see or write to.
+		//
+		// Empty UID is normalized to the "general" sentinel so the scope
+		// resolves to fixed:folders.general — without this, GetResourceScopeUID("")
+		// produces "folders:uid:" which never matches a granted permission.
+		destFolderUID := *cmd.FolderUID
+		if destFolderUID == "" {
+			destFolderUID = ac.GeneralFolderUID
+		}
+		allowed, err := l.AccessControl.Evaluate(c, signedInUser,
+			ac.EvalPermission(ActionLibraryPanelsCreate,
+				folder.ScopeFoldersProvider.GetResourceScopeUID(destFolderUID)))
+		if err != nil {
+			return model.LibraryElementDTO{}, err
+		}
+		if !allowed {
+			return model.LibraryElementDTO{}, fmt.Errorf("%w: folder UID '%s'",
+				model.ErrLibraryElementInsufficientPermissions, destFolderUID)
 		}
 	}
 

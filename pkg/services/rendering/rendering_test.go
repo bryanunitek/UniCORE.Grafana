@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/services/apiserver/endpoints/request"
 	"github.com/grafana/grafana/pkg/services/featuremgmt"
 	"github.com/grafana/grafana/pkg/setting"
 )
@@ -77,6 +79,27 @@ func TestGetUrl(t *testing.T) {
 	})
 }
 
+func TestGenerateImageRendererURL_CallbackOrg(t *testing.T) {
+	for _, renderType := range []RenderType{RenderPNG, RenderPDF, RenderCSV} {
+		for _, path := range []string{"d/dashboard", "d/dashboard?kiosk", "d/dashboard?orgId=1&orgId=2&kiosk"} {
+			t.Run(string(renderType)+"/"+path, func(t *testing.T) {
+				rs := &RenderingService{
+					Cfg:                 &setting.Cfg{RendererServerUrl: "http://renderer.example/render"},
+					rendererCallbackURL: "http://grafana.example/",
+				}
+				opts := Opts{CommonOpts: CommonOpts{AuthOpts: AuthOpts{OrgID: 3}, Path: path}}
+				rendererURL, err := rs.generateImageRendererURL(renderType, opts, "render-key")
+				require.NoError(t, err)
+				callbackURL, err := url.Parse(rendererURL.Query().Get("url"))
+				require.NoError(t, err)
+				require.Equal(t, "/d/dashboard", callbackURL.Path)
+				require.Equal(t, []string{"3"}, callbackURL.Query()["orgId"])
+				require.Equal(t, "1", callbackURL.Query().Get("render"))
+			})
+		}
+	}
+}
+
 func TestRenderErrorImage(t *testing.T) {
 	path, err := filepath.Abs("../../../")
 	require.NoError(t, err)
@@ -113,9 +136,8 @@ func TestRenderErrorImage(t *testing.T) {
 
 func TestRenderUnavailableError(t *testing.T) {
 	rs := RenderingService{
-		Cfg:                   &setting.Cfg{},
-		log:                   log.New("test"),
-		RendererPluginManager: &dummyPluginManager{},
+		Cfg: &setting.Cfg{},
+		log: log.New("test"),
 	}
 	opts := Opts{ErrorOpts: ErrorOpts{ErrorRenderUnavailable: true}}
 	result, err := rs.Render(context.Background(), RenderPNG, opts)
@@ -134,9 +156,10 @@ func TestRenderLimitImage(t *testing.T) {
 		},
 		log: log.New("test"),
 		perRequestRenderKeyProvider: &jwtRenderKeyProvider{
-			authToken: []byte("test"),
-			keyExpiry: time.Hour,
-			log:       log.New("test"),
+			authToken:  []byte("test"),
+			keyExpiry:  time.Hour,
+			log:        log.New("test"),
+			namespacer: request.GetNamespaceMapper(nil),
 		},
 	}
 	rs.inProgressCount.Store(2)
@@ -180,9 +203,10 @@ func TestRenderLimitImageError(t *testing.T) {
 		},
 		log: log.New("test"),
 		perRequestRenderKeyProvider: &jwtRenderKeyProvider{
-			authToken: []byte("test"),
-			keyExpiry: time.Hour,
-			log:       log.New("test"),
+			authToken:  []byte("test"),
+			keyExpiry:  time.Hour,
+			log:        log.New("test"),
+			namespacer: request.GetNamespaceMapper(nil),
 		},
 	}
 	rs.inProgressCount.Store(2)
@@ -283,7 +307,7 @@ func TestProvideService(t *testing.T) {
 	cfg.PDFsDir = filepath.Join(t.TempDir(), "pdfs")
 
 	t.Run("Default configuration values", func(t *testing.T) {
-		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil, &dummyPluginManager{})
+		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil)
 		require.NoError(t, err)
 
 		require.Equal(t, "", rs.Cfg.RendererServerUrl)
@@ -295,7 +319,7 @@ func TestProvideService(t *testing.T) {
 		cfg.RendererServerUrl = "http://custom-renderer:8081"
 		cfg.RendererCallbackUrl = ""
 
-		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil, &dummyPluginManager{})
+		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil)
 		require.NoError(t, err)
 
 		require.Equal(t, "http://custom-renderer:8081", rs.Cfg.RendererServerUrl)
@@ -307,7 +331,7 @@ func TestProvideService(t *testing.T) {
 		cfg.RendererServerUrl = "http://custom-renderer:8081"
 		cfg.RendererCallbackUrl = "http://public-grafana.com/"
 
-		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil, &dummyPluginManager{})
+		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil)
 		require.NoError(t, err)
 
 		require.Equal(t, "http://custom-renderer:8081", rs.Cfg.RendererServerUrl)
@@ -319,7 +343,7 @@ func TestProvideService(t *testing.T) {
 		cfg.RendererServerUrl = ""
 		cfg.RendererCallbackUrl = "https://public-grafana.com/"
 
-		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil, &dummyPluginManager{})
+		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil)
 		require.NoError(t, err)
 
 		require.Equal(t, "", rs.Cfg.RendererServerUrl)
@@ -331,7 +355,7 @@ func TestProvideService(t *testing.T) {
 		cfg.RendererServerUrl = ""
 		cfg.RendererCallbackUrl = "https://public-grafana.com"
 
-		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil, &dummyPluginManager{})
+		rs, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil)
 		require.NoError(t, err)
 
 		require.Equal(t, "", rs.Cfg.RendererServerUrl)
@@ -343,7 +367,7 @@ func TestProvideService(t *testing.T) {
 		cfg.RendererServerUrl = ""
 		cfg.RendererCallbackUrl = "http://public{grafana"
 
-		_, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil, &dummyPluginManager{})
+		_, err := ProvideService(cfg, featuremgmt.WithFeatures(), nil)
 		require.Error(t, err)
 	})
 
@@ -359,13 +383,13 @@ func TestProvideService(t *testing.T) {
 
 			t.Run("in dev mode returns an error", func(t *testing.T) {
 				cfg.Env = setting.Dev
-				_, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil, &dummyPluginManager{})
+				_, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil)
 				require.Error(t, err)
 			})
 
 			t.Run("in prod mode returns an error", func(t *testing.T) {
 				cfg.Env = setting.Prod
-				_, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil, &dummyPluginManager{})
+				_, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil)
 				require.Error(t, err)
 			})
 		})
@@ -381,14 +405,14 @@ func TestProvideService(t *testing.T) {
 
 			t.Run("in dev mode does not return an error", func(t *testing.T) {
 				cfg.Env = setting.Dev
-				rs, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil, &dummyPluginManager{})
+				rs, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil)
 				require.NoError(t, err)
 				require.NotNil(t, rs)
 			})
 
 			t.Run("in prod mode returns an error", func(t *testing.T) {
 				cfg.Env = setting.Prod
-				_, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil, &dummyPluginManager{})
+				_, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil)
 				require.Error(t, err)
 			})
 		})
@@ -404,14 +428,14 @@ func TestProvideService(t *testing.T) {
 
 			t.Run("in dev mode does not return an error", func(t *testing.T) {
 				cfg.Env = setting.Env
-				rs, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil, &dummyPluginManager{})
+				rs, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil)
 				require.NoError(t, err)
 				require.NotNil(t, rs)
 			})
 
 			t.Run("in prod mode does not return an error", func(t *testing.T) {
 				cfg.Env = setting.Prod
-				rs, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil, &dummyPluginManager{})
+				rs, err := ProvideService(cfg, featuremgmt.WithFeatures(featuremgmt.FlagRenderAuthJWT), nil)
 				require.NoError(t, err)
 				require.NotNil(t, rs)
 			})

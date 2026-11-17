@@ -208,13 +208,27 @@ export class QueryInspector extends PureComponent<Props, State> {
                 <span className={styles.refId}>{info.refId}:</span>
                 {info.frames > 1 && (
                   <span>
-                    <Trans i18nKey="inspector.query-inspector.count-frames" count={info.frames}>
+                    <Trans
+                      i18nKey="inspector.query-inspector.count-frames"
+                      count={info.frames}
+                      tOptions={{
+                        defaultValue_one: '{{count}} frames, ',
+                        defaultValue_other: '{{count}} frames, ',
+                      }}
+                    >
                       {'{{count}}'} frames,{' '}
                     </Trans>
                   </span>
                 )}
                 <span>
-                  <Trans i18nKey="inspector.query-inspector.count-rows" count={info.rows}>
+                  <Trans
+                    i18nKey="inspector.query-inspector.count-rows"
+                    count={info.rows}
+                    tOptions={{
+                      defaultValue_one: '{{count}} rows',
+                      defaultValue_other: '{{count}} rows',
+                    }}
+                  >
                     {'{{count}}'} rows
                   </Trans>
                 </span>
@@ -237,7 +251,7 @@ export class QueryInspector extends PureComponent<Props, State> {
 
     return (
       <div className={styles.wrap}>
-        <div aria-label={selectors.components.PanelInspector.Query.content}>
+        <div data-testid={selectors.components.PanelInspector.Query.content}>
           <h3 className={styles.heading}>
             <Trans i18nKey="inspector.query-inspector.query-inspector">Query inspector</Trans>
           </h3>
@@ -253,7 +267,7 @@ export class QueryInspector extends PureComponent<Props, State> {
           <Button
             icon="sync"
             onClick={onRefreshQuery}
-            aria-label={selectors.components.PanelInspector.Query.refreshButton}
+            data-testid={selectors.components.PanelInspector.Query.refreshButton}
           >
             <Trans i18nKey="inspector.query.refresh">Refresh</Trans>
           </Button>

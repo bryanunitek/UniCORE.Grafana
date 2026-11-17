@@ -31,10 +31,10 @@ func TestIntegrationProvisioning_PullJobFolderDepthExceeded(t *testing.T) {
 	const deepDir = "level1/level2/level3/level4/level5/level6/level7/level8"
 
 	repoPath := filepath.Join(helper.ProvisioningPath, repo)
-	helper.CreateRepo(t, common.TestRepo{
-		Name:   repo,
-		Path:   repoPath,
-		Target: "folder",
+	helper.CreateLocalRepo(t, common.TestRepo{
+		Name:       repo,
+		LocalPath:  repoPath,
+		SyncTarget: "folder",
 		Copies: map[string]string{
 			"../testdata/all-panels.json":    "shallow/dashboard1.json",
 			"../testdata/text-options.json":  deepDir + "/dashboard2.json",
@@ -163,10 +163,10 @@ func TestIntegrationProvisioning_PullJobFolderDepthExceeded_RecoversAfterFix(t *
 	deepDashboardRel := deepDir + "/dashboard.json"
 
 	repoPath := filepath.Join(helper.ProvisioningPath, repo)
-	helper.CreateRepo(t, common.TestRepo{
-		Name:   repo,
-		Path:   repoPath,
-		Target: "folder",
+	helper.CreateLocalRepo(t, common.TestRepo{
+		Name:       repo,
+		LocalPath:  repoPath,
+		SyncTarget: "folder",
 		Copies: map[string]string{
 			"../testdata/all-panels.json":   "ok/dashboard.json",
 			"../testdata/text-options.json": deepDashboardRel,

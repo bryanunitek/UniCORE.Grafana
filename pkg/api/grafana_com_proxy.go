@@ -19,6 +19,7 @@ import (
 var ssoTokenAllowedPaths = []*regexp.Regexp{
 	regexp.MustCompile(`^/?plugins$`),
 	regexp.MustCompile(`^/?plugins/[^/]+$`),
+	regexp.MustCompile(`^/?plugins/[^/]+/entitlement$`),
 	regexp.MustCompile(`^/?plugins/[^/]+/versions$`),
 	regexp.MustCompile(`^/?plugins/[^/]+/versions/[^/]+$`),
 	regexp.MustCompile(`^/?plugins/[^/]+/versions/[^/]+/logos/[^/]+$`),
@@ -74,7 +75,7 @@ func ReverseProxyGnetReq(logger log.Logger, proxyPath, version, grafanaComAPIUrl
 
 func (hs *HTTPServer) ProxyGnetRequest(c *contextmodel.ReqContext) {
 	proxyPath := web.Params(c.Req)["*"]
-	proxy := ReverseProxyGnetReq(c.Logger, proxyPath, hs.Cfg.BuildVersion, hs.Cfg.GrafanaComAPIURL, hs.Cfg.GrafanaComSSOAPIToken)
+	proxy := ReverseProxyGnetReq(c.Logger, proxyPath, hs.Cfg.BuildVersion, hs.Cfg.GrafanaComAPIURL, hs.Cfg.GrafanaComProxyAPIToken)
 	proxy.Transport = grafanaComProxyTransport
 	proxy.ServeHTTP(c.Resp, c.Req)
 }

@@ -24,7 +24,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/proxy"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 	"github.com/grafana/grafana-plugin-sdk-go/data/sqlutil"
-	"github.com/grafana/grafana/pkg/cmd/grafana-cli/logger"
+
 	"github.com/grafana/grafana/pkg/tsdb/mssql/kerberos"
 	"github.com/grafana/grafana/pkg/tsdb/mssql/utils"
 )
@@ -150,7 +150,7 @@ func NewQueryDataHandler(ctx context.Context, settings backend.DataSourceInstanc
 
 	proxyClient, err := settings.ProxyClient(ctx)
 	if err != nil {
-		logger.Error("mssql proxy creation failed", "error", err)
+		log.Error("mssql proxy creation failed", "error", err)
 		return nil, fmt.Errorf("mssql proxy creation failed")
 	}
 
@@ -186,7 +186,7 @@ func NewQueryDataHandler(ctx context.Context, settings backend.DataSourceInstanc
 
 		db, err := newMSSQL(driverName, config.RowLimit, config.DSInfo, cnnstr, log, proxyClient)
 		if err != nil {
-			logger.Error("Failed connecting to MSSQL", "err", err)
+			log.Error("Failed connecting to MSSQL", "err", err)
 			return nil, err
 		}
 
@@ -246,7 +246,7 @@ func (e *DataSourceHandler) getDB(ctx context.Context) (*sql.DB, error) {
 
 	db, err := newMSSQL(e.driverName, e.rowLimit, e.dsInfo, cnnstr, e.log, e.proxyClient)
 	if err != nil {
-		logger.Error("Failed connecting to MSSQL", "err", err)
+		e.log.Error("Failed connecting to MSSQL", "err", err)
 		return nil, err
 	}
 	e.dbConnections.Store(cacheKey, db)
@@ -374,13 +374,17 @@ func (e *DataSourceHandler) executeQuery(query backend.DataQuery, wg *sync.WaitG
 		return
 	}
 
-	frame := e.processResponse(qm, rows, interpolatedQuery, errAppendDebug)
+	frame := e.processResponse(qm, rows, interpolatedQuery, errAppendDebug, logger)
+	if frame == nil {
+		// processResponse failed and handled the query result with errAppendDebug
+		return
+	}
 
 	queryResult.dataResponse.Frames = data.Frames{frame}
 	ch <- queryResult
 }
 
-func (e *DataSourceHandler) processResponse(qm *dataQueryModel, rows *sql.Rows, interpolatedQuery string, errAppendDebug func(string, error, string, backend.ErrorSource)) *data.Frame {
+func (e *DataSourceHandler) processResponse(qm *dataQueryModel, rows *sql.Rows, interpolatedQuery string, errAppendDebug func(string, error, string, backend.ErrorSource), logger log.Logger) *data.Frame {
 	// Convert row.Rows to dataframe
 	stringConverters := e.queryResultTransformer.GetConverterList()
 	frame, err := sqlutil.FrameFromRows(rows, e.rowLimit, sqlutil.ToConverters(stringConverters...)...)
@@ -461,17 +465,36 @@ func (e *DataSourceHandler) processResponse(qm *dataQueryModel, rows *sql.Rows, 
 			}
 		}
 		if qm.FillMissing != nil && qm.Interval > 0 {
-			frame = e.applyFill(frame, qm)
+			frame = e.applyFill(frame, qm, logger)
 		}
 	}
 
 	return frame
 }
 
+// fillFreeFields is how wide a frame may be before the resample allowance starts
+// shrinking. Frames at or below this width keep the historical allowance of
+// rowLimit fill points, so ordinary panels are unaffected.
+const fillFreeFields = 10
+
+// maxFillPoints returns the largest number of fill points allowed for a frame
+// numFields wide. Resampling allocates one cell per field per fill point, and
+// nothing bounds the column count of a query, so past fillFreeFields the
+// allowance falls off as 1/numFields. That holds the total number of cells the
+// resample allocates at rowLimit*fillFreeFields however wide the frame gets,
+// while leaving narrow frames on the historical allowance.
+func maxFillPoints(rowLimit, numFields int64) int64 {
+	if numFields <= fillFreeFields {
+		return rowLimit
+	}
+	// Divide before multiplying so the product cannot overflow.
+	return rowLimit / numFields * fillFreeFields
+}
+
 // applyFill resamples frame using the fill configuration in qm. If the number
 // of fill points would exceed the row limit the fill is skipped and a warning
 // notice is appended to the frame instead.
-func (e *DataSourceHandler) applyFill(frame *data.Frame, qm *dataQueryModel) *data.Frame {
+func (e *DataSourceHandler) applyFill(frame *data.Frame, qm *dataQueryModel, logger log.Logger) *data.Frame {
 	// we align the start-time
 	startUnixTime := qm.TimeRange.From.Unix() / int64(qm.Interval.Seconds()) * int64(qm.Interval.Seconds())
 	alignedTimeRange := backend.TimeRange{
@@ -479,14 +502,17 @@ func (e *DataSourceHandler) applyFill(frame *data.Frame, qm *dataQueryModel) *da
 		To:   qm.TimeRange.To,
 	}
 
-	// Guard against excessive memory allocation from fill operations that span
-	// a very large time range relative to the fill interval.
+	// Guard against excessive memory allocation from fill operations that span a
+	// very large time range relative to the fill interval, or that fan a modest
+	// point count out across a very wide result set.
 	numFillPoints := int64(alignedTimeRange.To.Sub(alignedTimeRange.From) / qm.Interval)
-	if numFillPoints > e.rowLimit {
-		e.log.Warn("Skipping fill: number of fill points exceeds row limit",
-			"numFillPoints", numFillPoints, "rowLimit", e.rowLimit)
+	numFields := int64(len(frame.Fields))
+	maxPoints := maxFillPoints(e.rowLimit, numFields)
+	if numFillPoints > maxPoints {
+		e.log.Warn("Skipping fill: number of fill points exceeds the limit for this frame width",
+			"numFillPoints", numFillPoints, "numFields", numFields, "maxFillPoints", maxPoints, "rowLimit", e.rowLimit)
 		frame.AppendNotices(data.Notice{
-			Text:     "Fill operation skipped: time range and interval would require more points than the configured row limit",
+			Text:     "Fill operation skipped: time range, interval and number of columns would require more points than the configured row limit allows",
 			Severity: data.NoticeSeverityWarning,
 		})
 		return frame
